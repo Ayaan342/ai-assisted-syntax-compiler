@@ -1,11 +1,13 @@
 # AI-Assisted Syntax Error Detection and Correction Compiler
 
-This repository currently contains **Phases 1 through 4** of a Mini-C compiler
+This repository currently contains **Phases 1 through 5** of a Mini-C compiler
 front-end: a PLY Lex lexer, an explicitly defined PLY Yacc grammar, source-located
 AST construction and visualization, structured lexical/syntax diagnostics,
 examples, tests, traditional syntax recovery, source correction candidates, and
 model-independent AI context interfaces, a scoped symbol table, and basic semantic
-analysis. Candidate ranking and automatic correction remain deferred to later phases.
+analysis, validated synthetic ML data generation, explainable compiler-context
+features, and a Scikit-learn correction classifier. Automatic correction remains
+deferred to later phases.
 
 ## Setup
 
@@ -24,6 +26,9 @@ python -m venv .venv
 .\.venv\Scripts\python main.py --error-context examples\invalid\broken_if.mc
 .\.venv\Scripts\python main.py --symbols examples\valid\scopes_and_functions.mc
 .\.venv\Scripts\python main.py --semantic-errors examples\invalid\semantic_errors.mc
+.\.venv\Scripts\python main.py --generate-dataset
+.\.venv\Scripts\python main.py --train-model
+.\.venv\Scripts\python main.py --predict-error examples\invalid\broken_if.mc
 .\.venv\Scripts\python -m pytest
 ```
 
@@ -33,3 +38,5 @@ CFG and precedence table.
 Recovery design and candidate semantics are documented in
 `docs/error_recovery.md`.
 Scope and type rules are documented in `docs/semantic_analysis.md`.
+The dataset, feature, training, and prediction design is documented in
+`docs/ml_correction.md`.

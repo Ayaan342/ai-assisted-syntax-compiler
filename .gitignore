@@ -8,6 +8,9 @@ venv/
 
 parser.out
 parsetab.py
+models/*.joblib
+datasets/*.jsonl
+tests/.artifacts/
 
 .env
 .DS_Store

@@ -135,12 +135,12 @@ def infer_context(tokens: Sequence[TokenInfo], index: int) -> tuple[str, str]:
         and current_statement[0] in {"INT", "FLOAT", "CHAR", "BOOL", "VOID"}
     ):
         return "function_parameter_list", "function_definition"
-    if any(token_type in {"INT", "FLOAT", "CHAR", "BOOL", "VOID"} for token_type in current_statement):
-        return "declaration", "statement"
     last_lbracket = max((i for i, token_type in enumerate(types) if token_type == "LBRACKET"), default=-1)
     last_rbracket = max((i for i, token_type in enumerate(types) if token_type == "RBRACKET"), default=-1)
     if last_lbracket > last_rbracket:
         return "array_access", "expression"
+    if any(token_type in {"INT", "FLOAT", "CHAR", "BOOL", "VOID"} for token_type in current_statement):
+        return "declaration", "statement"
     last_lparen = max((i for i, token_type in enumerate(types) if token_type == "LPAREN"), default=-1)
     last_rparen = max((i for i, token_type in enumerate(types) if token_type == "RPAREN"), default=-1)
     if last_lparen > last_rparen and last_lparen > 0 and types[last_lparen - 1] == "IDENTIFIER":
@@ -229,6 +229,55 @@ class CandidateGenerator:
             add(CorrectionAction.DELETE, unexpected.type, unexpected.lexeme, unexpected.span, "",
                 "Consecutive assignment operators contain an extra token")
 
+        if unexpected and previous:
+            operator_replacements = {
+                ("ASSIGN", "GT"): ("GE", ">="),
+                ("ASSIGN", "LT"): ("LE", "<="),
+                ("EQ", "ASSIGN"): ("EQ", "=="),
+            }
+            replacement = operator_replacements.get((previous.type, unexpected.type))
+            if replacement is not None:
+                token_type, text = replacement
+                combined_span = SourceSpan(previous.span.start, unexpected.span.end)
+                add(
+                    CorrectionAction.REPLACE,
+                    token_type,
+                    previous.lexeme + unexpected.lexeme,
+                    combined_span,
+                    text,
+                    f"Replace malformed operator sequence with '{text}'",
+                )
+
+        keyword_spellings = {
+            "return": "RETURN",
+            "while": "WHILE",
+            "continue": "CONTINUE",
+            "break": "BREAK",
+            "int": "INT",
+            "float": "FLOAT",
+            "char": "CHAR",
+            "bool": "BOOL",
+            "void": "VOID",
+            "if": "IF",
+            "else": "ELSE",
+            "for": "FOR",
+        }
+        for suspicious in reversed(tokens[max(0, index - 3) : index + 1]):
+            if suspicious.type != "IDENTIFIER":
+                continue
+            nearest = min(keyword_spellings, key=lambda word: _edit_distance(suspicious.lexeme, word))
+            distance = _edit_distance(suspicious.lexeme, nearest)
+            if len(suspicious.lexeme) >= 4 and 0 < distance <= 2:
+                add(
+                    CorrectionAction.REPLACE,
+                    keyword_spellings[nearest],
+                    suspicious.lexeme,
+                    suspicious.span,
+                    nearest,
+                    f"Identifier '{suspicious.lexeme}' closely resembles keyword '{nearest}'",
+                )
+                break
+
         if unexpected and unexpected.type == "LBRACE" and "RPAREN" in expected:
             opening = next((token for token in reversed(tokens[:index]) if token.type == "LPAREN"), None)
             if opening:
@@ -245,3 +294,19 @@ class CandidateGenerator:
                 "Deleting the trailing operator yields a complete expression")
 
         return tuple(candidates)
+
+
+def _edit_distance(left: str, right: str) -> int:
+    previous = list(range(len(right) + 1))
+    for row, left_char in enumerate(left, start=1):
+        current = [row]
+        for column, right_char in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left_char != right_char),
+                )
+            )
+        previous = current
+    return previous[-1]
