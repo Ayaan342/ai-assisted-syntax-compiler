@@ -9,6 +9,8 @@ from pathlib import Path
 from compiler.ast_nodes import pretty_ast
 from compiler.lexer import tokenize
 from compiler.parser import parse
+from compiler.semantic_analyzer import analyze_source_semantics
+from compiler.symbol_table import pretty_symbol_table
 from ai.error_context import build_error_contexts
 
 
@@ -24,6 +26,8 @@ def main() -> int:
     mode.add_argument("--ast", action="store_true", help="parse and print the AST")
     mode.add_argument("--errors", action="store_true", help="show syntax recovery analysis")
     mode.add_argument("--error-context", action="store_true", help="print AI-ready error context as JSON")
+    mode.add_argument("--symbols", action="store_true", help="print the scoped symbol table")
+    mode.add_argument("--semantic-errors", action="store_true", help="show semantic diagnostics")
     parser.add_argument(
         "source",
         nargs="?",
@@ -37,6 +41,32 @@ def main() -> int:
         source = args.source.read_text(encoding="utf-8")
     except OSError as exc:
         parser.error(str(exc))
+
+    if args.symbols or args.semantic_errors:
+        analysis = analyze_source_semantics(source)
+        print(f"Source: {args.source}")
+        if analysis.semantic_result is None:
+            print("Semantic analysis skipped because lexical or syntax errors are present.")
+            return 1
+        if args.symbols:
+            print("\nSYMBOL TABLE")
+            print("------------")
+            print(pretty_symbol_table(analysis.semantic_result.symbol_table))
+        else:
+            diagnostics = analysis.semantic_result.diagnostics
+            print(f"Semantic errors: {len(diagnostics)}")
+            for index, error in enumerate(diagnostics, start=1):
+                print(f"\nSemantic Error {index}: {error.code}")
+                print("-" * 40)
+                print(f"Location: {error.line}:{error.column} @{error.span.start.offset}")
+                print(f"Identifier: {error.identifier or '(none)'}")
+                print(f"Scope: {error.scope_id or '(none)'}")
+                print(f"Message: {error.message}")
+                if error.expected_type is not None:
+                    print(f"Expected: {error.expected_type}")
+                if error.actual_type is not None:
+                    print(f"Actual: {error.actual_type}")
+        return 0 if analysis.success else 1
 
     if args.ast or args.errors or args.error_context:
         result = parse(source)

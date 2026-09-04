@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any, TypeAlias
 
 from .source_location import SourceSpan
@@ -31,6 +31,7 @@ def _serialize(value: Any) -> Any:
 @dataclass(slots=True, kw_only=True)
 class Program(ASTNode):
     functions: list[FunctionDefinition]
+    globals: list[VariableDeclaration | ArrayDeclaration] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)

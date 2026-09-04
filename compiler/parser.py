@@ -170,13 +170,29 @@ class MiniCParser:
         return SourceSpan(cls._span_of(first).start, cls._span_of(last).end)
 
     def p_program(self, p):
-        """program : function_list"""
-        p[0] = Program(functions=p[1], span=self._merge(p[1][0], p[1][-1]))
+        """program : external_list"""
+        functions = [item for item in p[1] if isinstance(item, FunctionDefinition)]
+        globals_ = [item for item in p[1] if isinstance(item, (VariableDeclaration, ArrayDeclaration))]
+        p[0] = Program(
+            functions=functions,
+            globals=globals_,
+            span=self._merge(p[1][0], p[1][-1]),
+        )
 
-    def p_function_list(self, p):
-        """function_list : function_list function_definition
-                         | function_definition"""
+    def p_external_list(self, p):
+        """external_list : external_list external
+                         | external"""
         p[0] = p[1] + [p[2]] if len(p) == 3 else [p[1]]
+
+    def p_external(self, p):
+        """external : function_definition
+                    | global_declaration"""
+        p[0] = p[1]
+
+    def p_global_declaration(self, p):
+        """global_declaration : declaration_core SEMICOLON"""
+        p[1].span = self._merge(p[1], p.slice[2])
+        p[0] = p[1]
 
     def p_function_definition(self, p):
         """function_definition : type_specifier IDENTIFIER LPAREN parameter_list_opt RPAREN block"""

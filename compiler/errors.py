@@ -91,3 +91,40 @@ class SyntaxDiagnostic:
             "correction_candidates": [candidate.to_dict() for candidate in self.correction_candidates],
             "span": self.span.to_dict(),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticDiagnostic:
+    phase: str
+    code: str
+    message: str
+    span: SourceSpan
+    identifier: str | None = None
+    expected_type: str | None = None
+    actual_type: str | None = None
+    scope_id: str | None = None
+    severity: str = "error"
+
+    @property
+    def line(self) -> int:
+        return self.span.start.line
+
+    @property
+    def column(self) -> int:
+        return self.span.start.column
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "phase": self.phase,
+            "code": self.code,
+            "severity": self.severity,
+            "line": self.line,
+            "column": self.column,
+            "offset": self.span.start.offset,
+            "span": self.span.to_dict(),
+            "identifier": self.identifier,
+            "message": self.message,
+            "expected_type": self.expected_type,
+            "actual_type": self.actual_type,
+            "scope_id": self.scope_id,
+        }
