@@ -2,3 +2,5 @@ ply==3.11
 pytest==8.3.5
 scikit-learn==1.7.2
 joblib==1.5.2
+groq==1.7.0
+python-dotenv==1.2.3

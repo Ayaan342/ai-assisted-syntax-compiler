@@ -16,6 +16,12 @@ from compiler.source_location import SourceLocation, SourceSpan
 from .candidate_ranker import RankedCandidate, rank_candidates
 from .error_context import ErrorContext
 from .error_predictor import AIErrorPredictor, ErrorPrediction, MLCorrectionPredictor
+from .llm_fallback import (
+    LLMFallbackResult,
+    LLMFallbackService,
+    LLMSuggestion,
+    suggestion_to_candidate,
+)
 
 
 AUTO_APPLY_THRESHOLD = 0.80
@@ -77,6 +83,30 @@ class CandidateAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMFallbackRecord:
+    attempted: bool
+    available: bool
+    model: str
+    suggestion: LLMSuggestion | None = None
+    candidate: CorrectionCandidate | None = None
+    validation: CandidateValidation | None = None
+    accepted: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempted": self.attempted,
+            "available": self.available,
+            "model": self.model,
+            "suggestion": self.suggestion.to_dict() if self.suggestion else None,
+            "candidate": self.candidate.to_dict() if self.candidate else None,
+            "validation": self.validation.to_dict() if self.validation else None,
+            "accepted": self.accepted,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CorrectionHistoryEntry:
     sequence: int
     status: CorrectionStatus
@@ -91,6 +121,7 @@ class CorrectionHistoryEntry:
     validation: CandidateValidation | None
     attempts: tuple[CandidateAttempt, ...] = ()
     reason: str | None = None
+    llm_fallback: LLMFallbackRecord | None = None
 
     @property
     def applied(self) -> bool:
@@ -115,6 +146,7 @@ class CorrectionHistoryEntry:
             "validation": self.validation.to_dict() if self.validation else None,
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "reason": self.reason,
+            "llm_fallback": self.llm_fallback.to_dict() if self.llm_fallback else None,
         }
 
 
@@ -155,9 +187,11 @@ class CorrectionOrchestrator:
         self,
         predictor: AIErrorPredictor,
         policy: CorrectionPolicy | None = None,
+        llm_fallback: LLMFallbackService | None = None,
     ) -> None:
         self.predictor = predictor
         self.policy = policy or CorrectionPolicy()
+        self.llm_fallback = llm_fallback
 
     def correct(self, source: str, *, auto_apply: bool = True) -> CorrectionResult:
         current = source
@@ -210,9 +244,27 @@ class CorrectionOrchestrator:
             before_snippet = _snippet(current, diagnostic.span.start.offset)
 
             if not ranked:
+                fallback = self._try_llm_fallback(
+                    current, baseline, diagnostic, context, prediction, seen_sources
+                ) if auto_apply else None
+                if fallback is not None and fallback.accepted:
+                    history.append(
+                        self._fallback_applied_entry(
+                            history, diagnostic, prediction, before_snippet, fallback
+                        )
+                    )
+                    current = fallback.validation.corrected_source
+                    seen_sources.add(current)
+                    corrections += 1
+                    continue
                 history.append(
                     self._unresolved_entry(
-                        history, diagnostic, prediction, before_snippet, "no_safe_candidate"
+                        history,
+                        diagnostic,
+                        prediction,
+                        before_snippet,
+                        "no_safe_candidate",
+                        llm_fallback=fallback,
                     )
                 )
                 stop_reason = "no_safe_candidate"
@@ -220,6 +272,19 @@ class CorrectionOrchestrator:
                 break
 
             if prediction.confidence < self.policy.llm_fallback_threshold:
+                fallback = self._try_llm_fallback(
+                    current, baseline, diagnostic, context, prediction, seen_sources
+                ) if auto_apply else None
+                if fallback is not None and fallback.accepted:
+                    history.append(
+                        self._fallback_applied_entry(
+                            history, diagnostic, prediction, before_snippet, fallback
+                        )
+                    )
+                    current = fallback.validation.corrected_source
+                    seen_sources.add(current)
+                    corrections += 1
+                    continue
                 history.append(
                     self._unresolved_entry(
                         history,
@@ -228,6 +293,7 @@ class CorrectionOrchestrator:
                         before_snippet,
                         "prediction_below_fallback_threshold",
                         ranked[0],
+                        llm_fallback=fallback,
                     )
                 )
                 stop_reason = "low_confidence_unresolved"
@@ -268,6 +334,24 @@ class CorrectionOrchestrator:
                     break
 
             if selected is None:
+                fallback = self._try_llm_fallback(
+                    current, baseline, diagnostic, context, prediction, seen_sources
+                ) if auto_apply else None
+                if fallback is not None and fallback.accepted:
+                    history.append(
+                        self._fallback_applied_entry(
+                            history,
+                            diagnostic,
+                            prediction,
+                            before_snippet,
+                            fallback,
+                            attempts=tuple(attempts),
+                        )
+                    )
+                    current = fallback.validation.corrected_source
+                    seen_sources.add(current)
+                    corrections += 1
+                    continue
                 history.append(
                     CorrectionHistoryEntry(
                         sequence=len(history) + 1,
@@ -283,6 +367,7 @@ class CorrectionOrchestrator:
                         validation=None,
                         attempts=tuple(attempts),
                         reason="no_candidate_passed_parser_validation",
+                        llm_fallback=fallback,
                     )
                 )
                 stop_reason = "no_candidate_passed_parser_validation"
@@ -370,6 +455,8 @@ class CorrectionOrchestrator:
         before_snippet: str,
         reason: str,
         ranked: RankedCandidate | None = None,
+        *,
+        llm_fallback: LLMFallbackRecord | None = None,
     ) -> CorrectionHistoryEntry:
         return CorrectionHistoryEntry(
             sequence=len(history) + 1,
@@ -384,6 +471,82 @@ class CorrectionOrchestrator:
             source_offset=diagnostic.span.start.offset,
             validation=None,
             reason=reason,
+            llm_fallback=llm_fallback,
+        )
+
+    def _try_llm_fallback(
+        self,
+        source: str,
+        baseline: ParseResult,
+        diagnostic: SyntaxDiagnostic,
+        context: ErrorContext,
+        prediction: ErrorPrediction,
+        seen_sources: set[str],
+    ) -> LLMFallbackRecord | None:
+        if self.llm_fallback is None:
+            return None
+        result: LLMFallbackResult = self.llm_fallback.suggest(context, prediction)
+        record = LLMFallbackRecord(
+            attempted=result.attempted,
+            available=result.available,
+            model=result.model,
+            suggestion=result.suggestion,
+            error=result.error,
+        )
+        if result.suggestion is None:
+            return record
+        try:
+            candidate = suggestion_to_candidate(result.suggestion, diagnostic, source)
+            validation = validate_candidate(
+                source,
+                candidate,
+                target_diagnostic=diagnostic,
+                baseline_result=baseline,
+            )
+        except ValueError as exc:
+            return replace(record, error=f"Unsafe LLM suggestion: {exc}")
+        accepted = (
+            validation.relevant_valid
+            and validation.corrected_source != source
+            and validation.corrected_source not in seen_sources
+        )
+        error = None if accepted else _rejection_reason(validation, source, seen_sources)
+        return replace(
+            record,
+            candidate=validation.candidate,
+            validation=validation,
+            accepted=accepted,
+            error=error,
+        )
+
+    @staticmethod
+    def _fallback_applied_entry(
+        history: list[CorrectionHistoryEntry],
+        diagnostic: SyntaxDiagnostic,
+        prediction: ErrorPrediction,
+        before_snippet: str,
+        fallback: LLMFallbackRecord,
+        *,
+        attempts: tuple[CandidateAttempt, ...] = (),
+    ) -> CorrectionHistoryEntry:
+        assert fallback.candidate is not None and fallback.validation is not None
+        return CorrectionHistoryEntry(
+            sequence=len(history) + 1,
+            status=CorrectionStatus.APPLIED,
+            diagnostic=diagnostic,
+            prediction=prediction,
+            selected_candidate=fallback.candidate,
+            candidate_rank=None,
+            candidate_probability=None,
+            before_snippet=before_snippet,
+            after_snippet=_snippet(
+                fallback.validation.corrected_source, fallback.candidate.offset
+            ),
+            source_offset=fallback.candidate.offset,
+            validation=fallback.validation,
+            attempts=attempts,
+            reason="llm_fallback_parser_validated",
+            llm_fallback=fallback,
         )
 
 
@@ -394,11 +557,12 @@ def correct_source(
     model_path: str | Path = Path("models/syntax_error_classifier.joblib"),
     policy: CorrectionPolicy | None = None,
     auto_apply: bool = True,
+    llm_fallback: LLMFallbackService | None = None,
 ) -> CorrectionResult:
     """Convenience entry point used by the CLI and future API layer."""
 
     active_predictor = predictor or MLCorrectionPredictor.load(model_path)
-    return CorrectionOrchestrator(active_predictor, policy).correct(
+    return CorrectionOrchestrator(active_predictor, policy, llm_fallback).correct(
         source, auto_apply=auto_apply
     )
 

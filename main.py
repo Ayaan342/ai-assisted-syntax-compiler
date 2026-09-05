@@ -15,6 +15,7 @@ from ai.error_context import build_error_contexts
 from ai.dataset_generator import SyntheticDatasetGenerator, class_counts, read_jsonl, write_jsonl
 from ai.error_predictor import MLCorrectionPredictor, train_classifier
 from ai.correction_orchestrator import CorrectionOrchestrator, CorrectionPolicy
+from ai.llm_fallback import GroqFallbackService
 
 
 def format_value(value: object) -> str:
@@ -98,7 +99,9 @@ def main() -> int:
         except ValueError as exc:
             parser.error(str(exc))
         predictor = MLCorrectionPredictor.load(args.model_path)
-        correction = CorrectionOrchestrator(predictor, policy).correct(
+        correction = CorrectionOrchestrator(
+            predictor, policy, GroqFallbackService()
+        ).correct(
             source, auto_apply=args.correct
         )
         print(f"Source: {args.source}")
@@ -116,8 +119,25 @@ def main() -> int:
                     f"Selected candidate: {candidate.action.value} "
                     f"{candidate.token_type or ''} {candidate.text!r} at offset {candidate.offset}"
                 )
-                print(f"Candidate class probability: {item.candidate_probability:.4f}")
-                print(f"Candidate rank: {item.candidate_rank}")
+                if item.candidate_probability is not None:
+                    print(f"Candidate class probability: {item.candidate_probability:.4f}")
+                if item.candidate_rank is not None:
+                    print(f"Candidate rank: {item.candidate_rank}")
+            if item.llm_fallback is not None:
+                fallback = item.llm_fallback
+                state = "used" if fallback.attempted else "unavailable"
+                print(f"Groq fallback: {state}")
+                print(f"Groq model: {fallback.model}")
+                if fallback.suggestion is not None:
+                    suggestion = fallback.suggestion
+                    print(
+                        f"LLM suggestion: {suggestion.action.value} "
+                        f"{suggestion.replacement_text!r} at "
+                        f"[{suggestion.target_start}, {suggestion.target_end})"
+                    )
+                if fallback.error is not None:
+                    print(f"Fallback result: {fallback.error}")
+                print(f"Correction accepted: {'yes' if fallback.accepted else 'no'}")
             if item.validation is not None:
                 print(
                     "Parser validation: "

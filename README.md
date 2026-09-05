@@ -1,13 +1,13 @@
 # AI-Assisted Syntax Error Detection and Correction Compiler
 
-This repository currently contains **Phases 1 through 6** of a Mini-C compiler
+This repository currently contains **Phases 1 through 7** of a Mini-C compiler
 front-end: a PLY Lex lexer, an explicitly defined PLY Yacc grammar, source-located
 AST construction and visualization, structured lexical/syntax diagnostics,
 examples, tests, traditional syntax recovery, source correction candidates, and
 model-independent AI context interfaces, a scoped symbol table, and basic semantic
 analysis, validated synthetic ML data generation, explainable compiler-context
-features, a Scikit-learn correction classifier, and iterative compiler-validated
-automatic correction. LLM fallback remains deferred to a later phase.
+features, a Scikit-learn correction classifier, iterative compiler-validated
+automatic correction, and a constrained Groq fallback for unresolved errors.
 
 ## Setup
 
@@ -45,3 +45,4 @@ The dataset, feature, training, and prediction design is documented in
 `docs/ml_correction.md`.
 The Phase 6 ranking, confidence, validation, and iteration policy is documented
 in `docs/automatic_correction.md`.
+The optional structured Groq fallback is documented in `docs/llm_fallback.md`.
