@@ -14,6 +14,7 @@ from compiler.symbol_table import pretty_symbol_table
 from ai.error_context import build_error_contexts
 from ai.dataset_generator import SyntheticDatasetGenerator, class_counts, read_jsonl, write_jsonl
 from ai.error_predictor import MLCorrectionPredictor, train_classifier
+from ai.correction_orchestrator import CorrectionOrchestrator, CorrectionPolicy
 
 
 def format_value(value: object) -> str:
@@ -33,9 +34,16 @@ def main() -> int:
     mode.add_argument("--generate-dataset", action="store_true", help="generate validated synthetic ML data")
     mode.add_argument("--train-model", action="store_true", help="train and save the correction classifier")
     mode.add_argument("--predict-error", action="store_true", help="predict the first compiler-detected error")
+    mode.add_argument("--correct", action="store_true", help="apply high-confidence parser-validated corrections")
+    mode.add_argument("--suggest-corrections", action="store_true", help="rank and validate a correction without editing source")
     parser.add_argument("--dataset-size", type=int, default=1008, help="synthetic record count (default: 1008)")
     parser.add_argument("--dataset-path", type=Path, default=Path("datasets/syntax_corrections.jsonl"))
     parser.add_argument("--model-path", type=Path, default=Path("models/syntax_error_classifier.joblib"))
+    parser.add_argument("--auto-apply-threshold", type=float, default=0.80)
+    parser.add_argument("--llm-fallback-threshold", type=float, default=0.60)
+    parser.add_argument("--max-corrections", type=int, default=10)
+    parser.add_argument("--max-candidate-attempts", type=int, default=5)
+    parser.add_argument("--max-repeated-offset-attempts", type=int, default=2)
     parser.add_argument(
         "source",
         nargs="?",
@@ -74,6 +82,61 @@ def main() -> int:
         source = args.source.read_text(encoding="utf-8")
     except OSError as exc:
         parser.error(str(exc))
+
+    if args.correct or args.suggest_corrections:
+        if not args.model_path.exists():
+            print(f"Model not found: {args.model_path}. Run --train-model first.")
+            return 1
+        try:
+            policy = CorrectionPolicy(
+                auto_apply_threshold=args.auto_apply_threshold,
+                llm_fallback_threshold=args.llm_fallback_threshold,
+                max_corrections=args.max_corrections,
+                max_candidate_attempts=args.max_candidate_attempts,
+                max_repeated_offset_attempts=args.max_repeated_offset_attempts,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        predictor = MLCorrectionPredictor.load(args.model_path)
+        correction = CorrectionOrchestrator(predictor, policy).correct(
+            source, auto_apply=args.correct
+        )
+        print(f"Source: {args.source}")
+        if not correction.history:
+            print("No syntax corrections were required.")
+        for item in correction.history:
+            print(f"\nCorrection {item.sequence}: {item.status.value}")
+            print("-" * 36)
+            print(f"Original syntax error: {item.diagnostic.message}")
+            print(f"ML prediction: {item.prediction.label}")
+            print(f"Confidence: {item.prediction.confidence:.4f}")
+            if item.selected_candidate is not None:
+                candidate = item.selected_candidate
+                print(
+                    f"Selected candidate: {candidate.action.value} "
+                    f"{candidate.token_type or ''} {candidate.text!r} at offset {candidate.offset}"
+                )
+                print(f"Candidate class probability: {item.candidate_probability:.4f}")
+                print(f"Candidate rank: {item.candidate_rank}")
+            if item.validation is not None:
+                print(
+                    "Parser validation: "
+                    + ("PASSED" if item.validation.relevant_valid else "REJECTED")
+                )
+                print(
+                    f"Remaining syntax errors after temporary edit: "
+                    f"{item.validation.remaining_syntax_errors}"
+                )
+            if item.reason:
+                print(f"Decision: {item.reason}")
+        print(f"\nCorrections applied: {correction.corrections_applied}")
+        print(f"Syntax valid: {'yes' if correction.fully_syntactically_valid else 'no'}")
+        print(f"Semantic errors: {len(correction.semantic_diagnostics)}")
+        print(f"Needs future LLM fallback: {'yes' if correction.needs_llm_fallback else 'no'}")
+        print(f"Stop reason: {correction.stop_reason}")
+        print("\nCorrected code:" if args.correct else "\nSource (not modified):")
+        print(correction.corrected_source)
+        return 0 if correction.success else 1
 
     if args.predict_error:
         result = parse(source)
