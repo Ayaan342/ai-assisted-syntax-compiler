@@ -1,13 +1,14 @@
 # AI-Assisted Syntax Error Detection and Correction Compiler
 
-This repository currently contains **Phases 1 through 7** of a Mini-C compiler
+This repository currently contains **Phases 1 through 8** of a Mini-C compiler
 front-end: a PLY Lex lexer, an explicitly defined PLY Yacc grammar, source-located
 AST construction and visualization, structured lexical/syntax diagnostics,
 examples, tests, traditional syntax recovery, source correction candidates, and
 model-independent AI context interfaces, a scoped symbol table, and basic semantic
 analysis, validated synthetic ML data generation, explainable compiler-context
 features, a Scikit-learn correction classifier, iterative compiler-validated
-automatic correction, and a constrained Groq fallback for unresolved errors.
+automatic correction, a constrained Groq fallback for unresolved errors, and a
+thin FastAPI backend for a future React/Monaco interface.
 
 ## Setup
 
@@ -32,6 +33,7 @@ python -m venv .venv
 .\.venv\Scripts\python main.py --correct examples\invalid\broken_if.mc
 .\.venv\Scripts\python main.py --suggest-corrections examples\invalid\missing_semicolon.mc
 .\.venv\Scripts\python main.py --correct --auto-apply-threshold 0.30 --llm-fallback-threshold 0.20 examples\invalid\multiple_errors.mc
+.\.venv\Scripts\python -m uvicorn backend.app.main:app --reload
 .\.venv\Scripts\python -m pytest
 ```
 
@@ -46,3 +48,5 @@ The dataset, feature, training, and prediction design is documented in
 The Phase 6 ranking, confidence, validation, and iteration policy is documented
 in `docs/automatic_correction.md`.
 The optional structured Groq fallback is documented in `docs/llm_fallback.md`.
+The FastAPI endpoints, schemas, error policy, and local run instructions are in
+`docs/api.md`.

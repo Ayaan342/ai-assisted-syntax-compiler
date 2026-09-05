@@ -1,2 +1,1 @@
-"""FastAPI transport layer placeholder; implementation starts in Phase 8."""
-
+"""FastAPI transport layer for the Mini-C compiler pipeline."""
