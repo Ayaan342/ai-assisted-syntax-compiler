@@ -17,6 +17,8 @@ from .candidate_ranker import RankedCandidate, rank_candidates
 from .error_context import ErrorContext
 from .error_predictor import AIErrorPredictor, ErrorPrediction, MLCorrectionPredictor
 from .llm_fallback import (
+    DEFAULT_AMBIGUITY_SELECTION_THRESHOLD,
+    LLMCandidateSelectionResult,
     LLMFallbackResult,
     LLMFallbackService,
     LLMSuggestion,
@@ -40,6 +42,7 @@ class CorrectionPolicy:
 
     auto_apply_threshold: float = AUTO_APPLY_THRESHOLD
     llm_fallback_threshold: float = LLM_FALLBACK_THRESHOLD
+    ambiguity_selection_threshold: float = DEFAULT_AMBIGUITY_SELECTION_THRESHOLD
     max_corrections: int = 10
     max_candidate_attempts: int = 5
     max_repeated_offset_attempts: int = 2
@@ -47,6 +50,8 @@ class CorrectionPolicy:
     def __post_init__(self) -> None:
         if not 0.0 <= self.llm_fallback_threshold <= self.auto_apply_threshold <= 1.0:
             raise ValueError("Thresholds must satisfy 0 <= fallback <= auto-apply <= 1")
+        if not 0.0 <= self.ambiguity_selection_threshold <= 1.0:
+            raise ValueError("Ambiguity selection threshold must be between 0 and 1")
         if min(
             self.max_corrections,
             self.max_candidate_attempts,
@@ -58,6 +63,7 @@ class CorrectionPolicy:
         return {
             "auto_apply_threshold": self.auto_apply_threshold,
             "llm_fallback_threshold": self.llm_fallback_threshold,
+            "ambiguity_selection_threshold": self.ambiguity_selection_threshold,
             "max_corrections": self.max_corrections,
             "max_candidate_attempts": self.max_candidate_attempts,
             "max_repeated_offset_attempts": self.max_repeated_offset_attempts,
@@ -107,6 +113,36 @@ class LLMFallbackRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class AmbiguitySelectionRecord:
+    attempted: bool
+    available: bool
+    model: str
+    selected_candidate_id: str | None = None
+    confidence: float | None = None
+    reason: str | None = None
+    selected_candidate: CorrectionCandidate | None = None
+    validation: CandidateValidation | None = None
+    accepted: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempted": self.attempted,
+            "available": self.available,
+            "model": self.model,
+            "selected_candidate_id": self.selected_candidate_id,
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "selected_candidate": (
+                self.selected_candidate.to_dict() if self.selected_candidate else None
+            ),
+            "validation": self.validation.to_dict() if self.validation else None,
+            "accepted": self.accepted,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CorrectionHistoryEntry:
     sequence: int
     status: CorrectionStatus
@@ -122,6 +158,7 @@ class CorrectionHistoryEntry:
     attempts: tuple[CandidateAttempt, ...] = ()
     reason: str | None = None
     llm_fallback: LLMFallbackRecord | None = None
+    ambiguity_selection: AmbiguitySelectionRecord | None = None
 
     @property
     def applied(self) -> bool:
@@ -147,6 +184,9 @@ class CorrectionHistoryEntry:
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "reason": self.reason,
             "llm_fallback": self.llm_fallback.to_dict() if self.llm_fallback else None,
+            "ambiguity_selection": (
+                self.ambiguity_selection.to_dict() if self.ambiguity_selection else None
+            ),
         }
 
 
@@ -271,41 +311,8 @@ class CorrectionOrchestrator:
                 needs_llm = True
                 break
 
-            if prediction.confidence < self.policy.llm_fallback_threshold:
-                fallback = self._try_llm_fallback(
-                    current, baseline, diagnostic, context, prediction, seen_sources
-                ) if auto_apply else None
-                if fallback is not None and fallback.accepted:
-                    history.append(
-                        self._fallback_applied_entry(
-                            history, diagnostic, prediction, before_snippet, fallback
-                        )
-                    )
-                    current = fallback.validation.corrected_source
-                    seen_sources.add(current)
-                    corrections += 1
-                    continue
-                history.append(
-                    self._unresolved_entry(
-                        history,
-                        diagnostic,
-                        prediction,
-                        before_snippet,
-                        "prediction_below_fallback_threshold",
-                        ranked[0],
-                        llm_fallback=fallback,
-                    )
-                )
-                stop_reason = "low_confidence_unresolved"
-                needs_llm = True
-                break
-
-            should_suggest = (
-                not auto_apply
-                or prediction.confidence < self.policy.auto_apply_threshold
-            )
             attempts: list[CandidateAttempt] = []
-            selected: tuple[int, RankedCandidate, CandidateValidation] | None = None
+            progressing: list[tuple[int, RankedCandidate, CandidateValidation]] = []
             for rank, ranked_item in enumerate(
                 ranked[: self.policy.max_candidate_attempts], start=1
             ):
@@ -330,10 +337,9 @@ class CorrectionOrchestrator:
                     CandidateAttempt(rank, ranked_item, validation, makes_progress, reason)
                 )
                 if makes_progress:
-                    selected = (rank, ranked_item, validation)
-                    break
+                    progressing.append((rank, ranked_item, validation))
 
-            if selected is None:
+            if not progressing:
                 fallback = self._try_llm_fallback(
                     current, baseline, diagnostic, context, prediction, seen_sources
                 ) if auto_apply else None
@@ -374,8 +380,158 @@ class CorrectionOrchestrator:
                 needs_llm = True
                 break
 
+            whole_program_repairs = [
+                item for item in progressing if item[2].valid
+            ]
+            eligible = whole_program_repairs or progressing
+            distinct_repairs: dict[str, tuple[int, RankedCandidate, CandidateValidation]] = {}
+            for item in eligible:
+                distinct_repairs.setdefault(item[2].corrected_source, item)
+            choices = list(distinct_repairs.values())
+
+            predicted_choices = [
+                item
+                for item in choices
+                if item[1].matched_class == prediction.label
+            ]
+            if len(choices) > 1 and len(predicted_choices) != 1:
+                ambiguity = (
+                    self._try_ambiguity_selection(
+                        current,
+                        baseline,
+                        diagnostic,
+                        context,
+                        choices,
+                        seen_sources,
+                    )
+                    if auto_apply
+                    else None
+                )
+                if ambiguity is not None and ambiguity.accepted:
+                    assert ambiguity.selected_candidate is not None
+                    assert ambiguity.validation is not None
+                    selected_choice = next(
+                        item
+                        for item in choices
+                        if item[2].candidate.id == ambiguity.selected_candidate_id
+                    )
+                    rank, ranked_item, _ = selected_choice
+                    history.append(
+                        CorrectionHistoryEntry(
+                            sequence=len(history) + 1,
+                            status=CorrectionStatus.APPLIED,
+                            diagnostic=diagnostic,
+                            prediction=prediction,
+                            selected_candidate=ambiguity.selected_candidate,
+                            candidate_rank=rank,
+                            candidate_probability=ranked_item.compatibility_score,
+                            before_snippet=before_snippet,
+                            after_snippet=_snippet(
+                                ambiguity.validation.corrected_source,
+                                ambiguity.selected_candidate.offset,
+                            ),
+                            source_offset=ambiguity.selected_candidate.offset,
+                            validation=ambiguity.validation,
+                            attempts=tuple(attempts),
+                            reason="ambiguity_selection_groq_parser_validated",
+                            ambiguity_selection=ambiguity,
+                        )
+                    )
+                    current = ambiguity.validation.corrected_source
+                    seen_sources.add(current)
+                    corrections += 1
+                    continue
+                history.append(
+                    CorrectionHistoryEntry(
+                        sequence=len(history) + 1,
+                        status=CorrectionStatus.UNRESOLVED,
+                        diagnostic=diagnostic,
+                        prediction=prediction,
+                        selected_candidate=None,
+                        candidate_rank=None,
+                        candidate_probability=None,
+                        before_snippet=before_snippet,
+                        after_snippet=None,
+                        source_offset=diagnostic.span.start.offset,
+                        validation=None,
+                        attempts=tuple(attempts),
+                        reason=(
+                            "ambiguity_selection_unresolved"
+                            if ambiguity is not None
+                            else "ambiguous_valid_candidates_without_reliable_model_preference"
+                        ),
+                        ambiguity_selection=ambiguity,
+                    )
+                )
+                stop_reason = "ambiguous_valid_candidates"
+                needs_llm = True
+                break
+
+            selected = predicted_choices[0] if len(predicted_choices) == 1 else choices[0]
+
             rank, ranked_item, validation = selected
             selected_candidate = validation.candidate
+            deterministic_compiler_edit = (
+                len(ranked) == 1
+                and ranked_item.matched_class is not None
+                and selected_candidate.origin == "traditional_recovery"
+                and validation.relevant_valid
+            )
+
+            # A unique compiler-generated edit that resolves the diagnostic is
+            # authoritative. The classifier still ranks and explains it, but an
+            # unrelated/low model class must not discard deterministic parser
+            # recovery or trigger an unnecessary remote fallback.
+            if (
+                prediction.confidence < self.policy.llm_fallback_threshold
+                and not deterministic_compiler_edit
+            ):
+                fallback = (
+                    self._try_llm_fallback(
+                        current,
+                        baseline,
+                        diagnostic,
+                        context,
+                        prediction,
+                        seen_sources,
+                    )
+                    if auto_apply
+                    else None
+                )
+                if fallback is not None and fallback.accepted:
+                    history.append(
+                        self._fallback_applied_entry(
+                            history,
+                            diagnostic,
+                            prediction,
+                            before_snippet,
+                            fallback,
+                            attempts=tuple(attempts),
+                        )
+                    )
+                    current = fallback.validation.corrected_source
+                    seen_sources.add(current)
+                    corrections += 1
+                    continue
+                history.append(
+                    self._unresolved_entry(
+                        history,
+                        diagnostic,
+                        prediction,
+                        before_snippet,
+                        "prediction_below_fallback_threshold",
+                        ranked[0],
+                        llm_fallback=fallback,
+                    )
+                )
+                stop_reason = "low_confidence_unresolved"
+                needs_llm = True
+                break
+
+            should_suggest = not auto_apply or (
+                prediction.confidence < self.policy.auto_apply_threshold
+                and not deterministic_compiler_edit
+            )
             if should_suggest:
                 history.append(
                     CorrectionHistoryEntry(
@@ -419,7 +575,12 @@ class CorrectionOrchestrator:
                     source_offset=selected_candidate.offset,
                     validation=validation,
                     attempts=tuple(attempts),
-                    reason="high_confidence_and_parser_validated",
+                    reason=(
+                        "unique_compiler_candidate_parser_validated"
+                        if deterministic_compiler_edit
+                        and prediction.confidence < self.policy.auto_apply_threshold
+                        else "high_confidence_and_parser_validated"
+                    ),
                 )
             )
             current = validation.corrected_source
@@ -514,6 +675,78 @@ class CorrectionOrchestrator:
         return replace(
             record,
             candidate=validation.candidate,
+            validation=validation,
+            accepted=accepted,
+            error=error,
+        )
+
+    def _try_ambiguity_selection(
+        self,
+        source: str,
+        baseline: ParseResult,
+        diagnostic: SyntaxDiagnostic,
+        context: ErrorContext,
+        choices: list[tuple[int, RankedCandidate, CandidateValidation]],
+        seen_sources: set[str],
+    ) -> AmbiguitySelectionRecord | None:
+        if self.llm_fallback is None:
+            return None
+        selector = getattr(self.llm_fallback, "select_candidate", None)
+        if not callable(selector):
+            return AmbiguitySelectionRecord(
+                attempted=False,
+                available=False,
+                model=getattr(self.llm_fallback, "model", "unknown"),
+                error="Groq ambiguity selection is unavailable",
+            )
+        result: LLMCandidateSelectionResult = selector(
+            source,
+            context,
+            [item[2] for item in choices],
+        )
+        selection = result.selection
+        record = AmbiguitySelectionRecord(
+            attempted=result.attempted,
+            available=result.available,
+            model=result.model,
+            selected_candidate_id=(
+                selection.selected_candidate_id if selection else None
+            ),
+            confidence=selection.confidence if selection else None,
+            reason=selection.reason if selection else None,
+            error=result.error,
+        )
+        if selection is None or selection.selected_candidate_id is None:
+            return record
+        selected = next(
+            (
+                item
+                for item in choices
+                if item[2].candidate.id == selection.selected_candidate_id
+            ),
+            None,
+        )
+        if selected is None:
+            return replace(record, error="Groq selected an unknown candidate ID")
+        candidate = selected[2].candidate
+        record = replace(record, selected_candidate=candidate)
+        if selection.confidence < self.policy.ambiguity_selection_threshold:
+            return replace(record, error="Groq selection confidence is below threshold")
+        validation = validate_candidate(
+            source,
+            candidate,
+            target_diagnostic=diagnostic,
+            baseline_result=baseline,
+        )
+        accepted = (
+            validation.relevant_valid
+            and validation.corrected_source != source
+            and validation.corrected_source not in seen_sources
+        )
+        error = None if accepted else _rejection_reason(validation, source, seen_sources)
+        return replace(
+            record,
+            selected_candidate=validation.candidate,
             validation=validation,
             accepted=accepted,
             error=error,

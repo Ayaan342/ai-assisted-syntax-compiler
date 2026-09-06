@@ -12,13 +12,20 @@ from .correction_orchestrator import (
     CorrectionStatus,
     correct_source,
 )
-from .llm_fallback import GroqFallbackService, LLMFallbackResult, LLMSuggestion
+from .llm_fallback import (
+    GroqFallbackService,
+    LLMCandidateSelection,
+    LLMCandidateSelectionResult,
+    LLMFallbackResult,
+    LLMSuggestion,
+)
 
 __all__ = [
     "AIErrorPredictor", "CorrectionClass", "CorrectionOrchestrator", "CorrectionPolicy",
     "CorrectionResult", "CorrectionStatus", "DatasetRecord", "ErrorContext",
     "ErrorPrediction", "MLCorrectionPredictor", "SemanticContext",
-    "GroqFallbackService", "LLMFallbackResult", "LLMSuggestion",
+    "GroqFallbackService", "LLMCandidateSelection", "LLMCandidateSelectionResult",
+    "LLMFallbackResult", "LLMSuggestion",
     "SyntheticDatasetGenerator", "TokenContext", "TrainingReport",
     "build_error_contexts", "build_semantic_contexts", "correct_source", "train_classifier",
 ]

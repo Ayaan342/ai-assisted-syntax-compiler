@@ -77,6 +77,19 @@ export function CorrectionPanel({
                 Groq {h.llm_fallback?.attempted ? "used" : "not used"}
               </span>
               <span>
+                Intent selector{" "}
+                {h.ambiguity_selection?.attempted
+                  ? h.ambiguity_selection.accepted
+                    ? "selected"
+                    : "unresolved"
+                  : "not used"}
+              </span>
+              {h.ambiguity_selection?.confidence != null && (
+                <span>
+                  {(h.ambiguity_selection.confidence * 100).toFixed(1)}% selector
+                </span>
+              )}
+              <span>
                 Validation{" "}
                 {h.validation
                   ? h.validation.relevant_valid
@@ -84,9 +97,16 @@ export function CorrectionPanel({
                     : "failed"
                   : h.llm_fallback?.validation
                     ? "failed"
+                    : h.ambiguity_selection?.validation
+                      ? h.ambiguity_selection.validation.relevant_valid
+                        ? "passed"
+                        : "failed"
                     : "not run"}
               </span>
             </div>
+            {h.ambiguity_selection?.reason && (
+              <p>{h.ambiguity_selection.reason}</p>
+            )}
           </article>
         ))}
       </div>

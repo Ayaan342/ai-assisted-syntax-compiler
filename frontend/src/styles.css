@@ -17,8 +17,7 @@
 body {
   margin: 0;
 }
-button,
-select {
+button {
   font: inherit;
 }
 button {
@@ -48,7 +47,6 @@ button:disabled {
   cursor: not-allowed;
 }
 button:focus-visible,
-select:focus-visible,
 summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--accent);
@@ -155,8 +153,6 @@ h1 span {
   height: 83px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
 }
 .workspace-heading > div {
   display: flex;
@@ -173,21 +169,6 @@ h1 span {
   font-size: 16px;
   color: #e0e7e2;
   letter-spacing: -0.3px;
-}
-.workspace-heading label {
-  font-size: 11px;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-select {
-  background: #1b2120;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: #d4dfd7;
-  padding: 8px 30px 8px 10px;
-  font-size: 12px;
 }
 .workbench {
   display: grid;

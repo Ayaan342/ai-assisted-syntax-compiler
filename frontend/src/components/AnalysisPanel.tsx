@@ -117,6 +117,43 @@ export function AnalysisPanel({
           </span>
         </div>
         <div className="key-value">
+          <span>Groq intent selection</span>
+          <span>
+            {history?.ambiguity_selection
+              ? !history.ambiguity_selection.available
+                ? "Unavailable"
+                : history.ambiguity_selection.attempted
+                  ? history.ambiguity_selection.accepted
+                    ? "Selected"
+                    : "Unresolved"
+                  : "Not used"
+              : "Not used"}
+          </span>
+        </div>
+        {history?.ambiguity_selection && (
+          <>
+            <div className="key-value">
+              <span>Selected candidate</span>
+              <code>
+                {history.ambiguity_selection.selected_candidate_id ?? "None"}
+              </code>
+            </div>
+            <div className="key-value">
+              <span>Selection confidence</span>
+              <code>
+                {history.ambiguity_selection.confidence == null
+                  ? "Unavailable"
+                  : `${(history.ambiguity_selection.confidence * 100).toFixed(1)}%`}
+              </code>
+            </div>
+            <p className="muted">
+              {history.ambiguity_selection.reason ??
+                history.ambiguity_selection.error ??
+                "No selection reason returned."}
+            </p>
+          </>
+        )}
+        <div className="key-value">
           <span>Parser validation</span>
           <span className={history?.validation?.relevant_valid ? "accent" : ""}>
             {history?.validation
@@ -125,6 +162,10 @@ export function AnalysisPanel({
                 : "Failed"
               : history?.llm_fallback?.validation
                 ? "Failed"
+                : history?.ambiguity_selection?.validation
+                  ? history.ambiguity_selection.validation.relevant_valid
+                    ? "Passed"
+                    : "Failed"
                 : "Not run"}
           </span>
         </div>

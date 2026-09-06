@@ -9,10 +9,16 @@ import pytest
 from ai.correction_orchestrator import CorrectionOrchestrator
 from ai.dataset_generator import CorrectionClass
 from ai.error_predictor import ErrorPrediction
-from ai.llm_fallback import LLMFallbackResult, LLMSuggestion
+from ai.llm_fallback import (
+    LLMCandidateSelection,
+    LLMCandidateSelectionResult,
+    LLMFallbackResult,
+    LLMSuggestion,
+)
 from backend.app.dependencies import ModelUnavailableError, get_orchestrator
 from backend.app.main import app
 from compiler.correction import CorrectionAction
+from compiler.parser import parse
 
 
 class FixedPredictor:
@@ -27,6 +33,31 @@ class FixedPredictor:
         return self.prediction
 
 
+class MisclassifiedSemicolonPredictor:
+    def predict_error_type(self, context):
+        return ErrorPrediction(
+            CorrectionClass.CORRECT_KEYWORD.value,
+            0.7131919144492387,
+            {
+                CorrectionClass.CORRECT_KEYWORD.value: 0.7131919144492387,
+                CorrectionClass.INSERT_SEMICOLON.value: 0.09367653851895673,
+            },
+        )
+
+
+class AmbiguousBracePredictor:
+    def predict_error_type(self, context):
+        return ErrorPrediction(
+            CorrectionClass.REPLACE_BRACKET.value,
+            0.99,
+            {
+                CorrectionClass.REPLACE_BRACKET.value: 0.99,
+                CorrectionClass.INSERT_RBRACE.value: 0.005,
+                CorrectionClass.DELETE_EXTRA_TOKEN.value: 0.005,
+            },
+        )
+
+
 class FakeFallback:
     model = "mock-groq"
 
@@ -37,6 +68,30 @@ class FakeFallback:
     def suggest(self, context, prediction):
         self.calls += 1
         return self.result
+
+
+class SelectingFallback(FakeFallback):
+    def __init__(self) -> None:
+        super().__init__(LLMFallbackResult(False, False, "mock-groq", error="unused"))
+        self.selection_calls = 0
+
+    def select_candidate(self, source, context, candidates):
+        self.selection_calls += 1
+        deletion = next(
+            validation
+            for validation in candidates
+            if validation.candidate.action is CorrectionAction.DELETE
+        )
+        return LLMCandidateSelectionResult(
+            True,
+            True,
+            "mock-groq",
+            selection=LLMCandidateSelection(
+                deletion.candidate.id,
+                0.91,
+                "Deleting the trailing opener preserves the surrounding function.",
+            ),
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -152,6 +207,80 @@ def test_correction_response_is_complete_and_serializable() -> None:
     assert "true) {" in body["corrected_code"]
     assert body["confidence_values"] == [0.99]
     assert body["unresolved_syntax_diagnostics"] == []
+
+
+def test_correction_api_preserves_unique_validated_semicolon_over_unrelated_ml_class() -> None:
+    source = """int main() {
+int x = 10;
+if (x > 5) {
+    return x
+}
+
+return 0;
+}"""
+    use_orchestrator(CorrectionOrchestrator(MisclassifiedSemicolonPredictor()))
+
+    response = request("POST", "/correct", json={"code": source})
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["original_code"] == source
+    assert body["corrected_code"] != body["original_code"]
+    assert "return x;\n}" in body["corrected_code"]
+    assert parse(body["corrected_code"]).valid
+    assert body["success"] and body["corrections_applied"] == 1
+    assert body["predictions"][0]["label"] == CorrectionClass.CORRECT_KEYWORD.value
+    history = body["history"][0]
+    assert history["status"] == "APPLIED" and history["applied"]
+    assert history["selected_candidate"]["action"] == "INSERT"
+    assert history["selected_candidate"]["token_type"] == "SEMICOLON"
+    assert history["validation"]["relevant_valid"]
+    assert history["reason"] == "unique_compiler_candidate_parser_validated"
+
+
+def test_correction_api_serializes_ambiguous_valid_alternatives_without_mutation() -> None:
+    source = "int main(){ int x=10; if(x>5){ return x; } return 0; { }"
+    use_orchestrator(CorrectionOrchestrator(AmbiguousBracePredictor()))
+
+    response = request("POST", "/correct", json={"code": source})
+    body = response.json()
+
+    assert response.status_code == 200
+    assert not body["success"] and body["corrections_applied"] == 0
+    assert body["original_code"] == body["corrected_code"] == source
+    assert body["stop_reason"] == "ambiguous_valid_candidates"
+    history = body["history"][0]
+    assert history["status"] == "UNRESOLVED"
+    assert history["selected_candidate"] is None
+    assert len(history["attempts"]) == 2
+    assert all(attempt["validation"]["valid"] for attempt in history["attempts"])
+
+
+def test_correction_api_exposes_successful_groq_ambiguity_selection() -> None:
+    source = "int main(){ int x=10; if(x>5){ return x; } return 0; { }"
+    selector = SelectingFallback()
+    use_orchestrator(
+        CorrectionOrchestrator(AmbiguousBracePredictor(), llm_fallback=selector)
+    )
+
+    response = request("POST", "/correct", json={"code": source})
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["success"] and body["corrections_applied"] == 1
+    assert body["original_code"] == source
+    assert body["corrected_code"] != source
+    assert body["ambiguity_selection_used"]
+    assert not body["groq_fallback_used"]
+    history = body["history"][0]
+    selection = history["ambiguity_selection"]
+    assert selection["attempted"] and selection["accepted"]
+    assert selection["selected_candidate_id"] == history["selected_candidate"]["id"]
+    assert selection["confidence"] == pytest.approx(0.91)
+    assert selection["reason"].startswith("Deleting the trailing opener")
+    assert selection["validation"]["valid"]
+    assert history["validation"]["valid"]
+    assert parse(body["corrected_code"]).valid
 
 
 def test_correction_endpoint_supports_mocked_llm_fallback() -> None:

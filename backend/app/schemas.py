@@ -67,6 +67,7 @@ class CorrectionResponse(BaseModel):
     predictions: list[dict[str, Any]]
     confidence_values: list[float]
     groq_fallback_used: bool
+    ambiguity_selection_used: bool
     needs_llm_fallback: bool
     unresolved_syntax_diagnostics: list[dict[str, Any]]
     semantic_diagnostics: list[dict[str, Any]]

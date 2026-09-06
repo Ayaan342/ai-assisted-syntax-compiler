@@ -118,6 +118,18 @@ export interface GroqFallback {
   } | null;
   validation: Validation | null;
 }
+export interface GroqAmbiguitySelection {
+  attempted: boolean;
+  available: boolean;
+  model: string;
+  selected_candidate_id: string | null;
+  confidence: number | null;
+  reason: string | null;
+  selected_candidate: Candidate | null;
+  validation: Validation | null;
+  accepted: boolean;
+  error: string | null;
+}
 export interface CorrectionHistory {
   sequence: number;
   status: "APPLIED" | "SUGGESTED" | "UNRESOLVED";
@@ -134,6 +146,7 @@ export interface CorrectionHistory {
   validation: Validation | null;
   reason: string | null;
   llm_fallback: GroqFallback | null;
+  ambiguity_selection: GroqAmbiguitySelection | null;
 }
 export interface AnalysisResponse {
   success: boolean;
@@ -154,6 +167,7 @@ export interface CorrectionResponse {
   predictions: Prediction[];
   confidence_values: number[];
   groq_fallback_used: boolean;
+  ambiguity_selection_used: boolean;
   needs_llm_fallback: boolean;
   unresolved_syntax_diagnostics: Diagnostic[];
   semantic_diagnostics: Diagnostic[];

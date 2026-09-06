@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 import json
 from pathlib import Path
 
 import pytest
 
+import ai.correction_orchestrator as orchestrator_module
 from ai.correction_orchestrator import CorrectionOrchestrator, CorrectionStatus
 from ai.dataset_generator import CorrectionClass
 from ai.error_context import ErrorContext
@@ -13,12 +15,15 @@ from ai.error_predictor import ErrorPrediction
 from ai.llm_fallback import (
     DEFAULT_GROQ_MODEL,
     GroqFallbackService,
+    LLMCandidateSelection,
+    LLMCandidateSelectionResult,
     LLMFallbackResult,
     LLMSuggestion,
     parse_llm_suggestion,
+    parse_candidate_selection,
     suggestion_to_candidate,
 )
-from compiler.correction import CorrectionAction, apply_candidate
+from compiler.correction import CorrectionAction, apply_candidate, validate_candidate
 from compiler.parser import parse
 
 
@@ -46,6 +51,31 @@ class FakeFallback:
         return self.result
 
 
+class FakeAmbiguitySelector(FakeFallback):
+    def __init__(self, selection_result: LLMCandidateSelectionResult) -> None:
+        super().__init__(LLMFallbackResult(False, False, self.model, error="unused"))
+        self.selection_result = selection_result
+        self.selection_calls = 0
+        self.selection_payload = None
+
+    def select_candidate(self, source, context, candidates):
+        self.selection_calls += 1
+        self.selection_payload = (source, context, tuple(candidates))
+        return self.selection_result
+
+
+class LabelPredictor:
+    def __init__(self, label: CorrectionClass, confidence: float = 0.99) -> None:
+        self.prediction = ErrorPrediction(
+            label.value,
+            confidence,
+            {label.value: confidence},
+        )
+
+    def predict_error_type(self, context):
+        return self.prediction
+
+
 class FakeCompletions:
     def __init__(self, content: str) -> None:
         self.content = content
@@ -60,6 +90,48 @@ class FakeCompletions:
 def fake_client(content: str):
     completions = FakeCompletions(content)
     return SimpleNamespace(chat=SimpleNamespace(completions=completions)), completions
+
+
+def ambiguity_source() -> str:
+    return "int main(){ int x=10; if(x>5){ return x; } return 0; { }"
+
+
+def selection_result(
+    candidate_id: str | None,
+    confidence: float = 0.91,
+    reason: str = "The local deletion better preserves the surrounding function.",
+) -> LLMCandidateSelectionResult:
+    return LLMCandidateSelectionResult(
+        True,
+        True,
+        "mock-groq-model",
+        selection=LLMCandidateSelection(candidate_id, confidence, reason),
+    )
+
+
+def ambiguity_candidate_id(action: CorrectionAction) -> str:
+    diagnostic = parse(ambiguity_source()).syntax_errors[0]
+    return next(
+        candidate.id
+        for candidate in diagnostic.correction_candidates
+        if candidate.action is action
+    )
+
+
+def validated_ambiguity_candidates():
+    source = ambiguity_source()
+    result, diagnostic, context = context_for(source)
+    validations = tuple(
+        validate_candidate(
+            source,
+            candidate,
+            target_diagnostic=diagnostic,
+            baseline_result=result,
+        )
+        for candidate in diagnostic.correction_candidates
+    )
+    assert all(validation.valid for validation in validations)
+    return source, context, validations
 
 
 def context_for(source: str):
@@ -230,3 +302,215 @@ def test_unavailable_fallback_preserves_phase6_unresolved_behavior() -> None:
     assert result.needs_llm_fallback and not result.success
     assert result.stop_reason == "low_confidence_unresolved"
     assert result.history[0].status is CorrectionStatus.UNRESOLVED
+
+
+def test_ambiguity_ml_unique_match_does_not_call_groq() -> None:
+    selector = FakeAmbiguitySelector(selection_result(None))
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.INSERT_RBRACE),
+        llm_fallback=selector,
+    ).correct(ambiguity_source())
+
+    assert result.success and selector.selection_calls == 0
+    assert result.history[0].selected_candidate.action is CorrectionAction.INSERT
+    assert result.history[0].ambiguity_selection is None
+
+
+def test_ambiguity_unrelated_ml_calls_groq_selector() -> None:
+    selector = FakeAmbiguitySelector(selection_result(None, 0.42, "Both are plausible."))
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.REPLACE_BRACKET),
+        llm_fallback=selector,
+    ).correct(ambiguity_source())
+
+    assert selector.selection_calls == 1
+    assert not result.success and result.corrected_source == result.original_source
+    record = result.history[0].ambiguity_selection
+    assert record is not None and record.attempted and not record.accepted
+    assert record.selected_candidate_id is None and record.confidence == 0.42
+
+
+def test_ambiguity_groq_selection_is_revalidated_and_prepared() -> None:
+    candidate_id = ambiguity_candidate_id(CorrectionAction.DELETE)
+    selector = FakeAmbiguitySelector(selection_result(candidate_id))
+    source = ambiguity_source()
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.REPLACE_BRACKET),
+        llm_fallback=selector,
+    ).correct(source)
+
+    assert result.success and result.corrections_applied == 1
+    assert result.original_source == source
+    assert result.corrected_source != source and "return 0;  }" in result.corrected_source
+    entry = result.history[0]
+    assert entry.reason == "ambiguity_selection_groq_parser_validated"
+    assert entry.selected_candidate.id == candidate_id
+    assert entry.selected_candidate.action is CorrectionAction.DELETE
+    assert entry.validation is not None and entry.validation.valid
+    assert entry.ambiguity_selection is not None
+    assert entry.ambiguity_selection.accepted
+    assert entry.ambiguity_selection.validation is entry.validation
+    assert parse(result.corrected_source).valid
+
+
+def test_ambiguity_invalid_candidate_id_remains_unresolved() -> None:
+    selector = FakeAmbiguitySelector(selection_result("not-a-compiler-candidate"))
+    source = ambiguity_source()
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.REPLACE_BRACKET),
+        llm_fallback=selector,
+    ).correct(source)
+
+    assert not result.success and result.corrected_source == source
+    record = result.history[0].ambiguity_selection
+    assert record is not None and not record.accepted
+    assert record.error == "Groq selected an unknown candidate ID"
+
+
+def test_ambiguity_low_selection_confidence_remains_unresolved() -> None:
+    candidate_id = ambiguity_candidate_id(CorrectionAction.DELETE)
+    selector = FakeAmbiguitySelector(selection_result(candidate_id, 0.74))
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.REPLACE_BRACKET),
+        llm_fallback=selector,
+    ).correct(ambiguity_source())
+
+    record = result.history[0].ambiguity_selection
+    assert not result.success and result.corrections_applied == 0
+    assert record is not None and not record.accepted
+    assert record.confidence == 0.74
+    assert record.error == "Groq selection confidence is below threshold"
+
+
+def test_ambiguity_selector_rejects_malformed_json() -> None:
+    source, context, candidates = validated_ambiguity_candidates()
+    client, _ = fake_client("not json")
+
+    result = GroqFallbackService(client=client).select_candidate(
+        source, context, candidates
+    )
+
+    assert result.attempted and result.selection is None
+    assert result.error.startswith("Malformed Groq selection response")
+
+
+def test_ambiguity_selector_handles_provider_failure() -> None:
+    class FailingCompletions:
+        def create(self, **kwargs):
+            raise RuntimeError("provider unavailable")
+
+    source, context, candidates = validated_ambiguity_candidates()
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FailingCompletions())
+    )
+
+    result = GroqFallbackService(client=client).select_candidate(
+        source, context, candidates
+    )
+
+    assert result.attempted and result.selection is None
+    assert result.error == "Groq selection request failed: RuntimeError"
+
+
+def test_ambiguity_selected_candidate_must_pass_final_revalidation(monkeypatch) -> None:
+    candidate_id = ambiguity_candidate_id(CorrectionAction.DELETE)
+    selector = FakeAmbiguitySelector(selection_result(candidate_id))
+    real_validate = orchestrator_module.validate_candidate
+    calls = 0
+
+    def fail_only_final_validation(*args, **kwargs):
+        nonlocal calls
+        validation = real_validate(*args, **kwargs)
+        if validation.candidate.id == candidate_id:
+            calls += 1
+            if calls == 2:
+                return replace(validation, valid=False, relevant_valid=False)
+        return validation
+
+    monkeypatch.setattr(
+        orchestrator_module, "validate_candidate", fail_only_final_validation
+    )
+    source = ambiguity_source()
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.REPLACE_BRACKET),
+        llm_fallback=selector,
+    ).correct(source)
+
+    assert not result.success and result.corrected_source == source
+    record = result.history[0].ambiguity_selection
+    assert record is not None and record.validation is not None
+    assert not record.accepted and not record.validation.relevant_valid
+
+
+def test_ambiguity_prompt_contains_only_source_context_and_validated_candidates() -> None:
+    source, context, candidates = validated_ambiguity_candidates()
+    candidate_id = ambiguity_candidate_id(CorrectionAction.DELETE)
+    content = json.dumps(
+        LLMCandidateSelection(candidate_id, 0.91, "Delete the stray opener.").to_dict()
+    )
+    client, completions = fake_client(content)
+
+    result = GroqFallbackService(client=client).select_candidate(
+        source, context, candidates
+    )
+
+    assert result.selection is not None
+    call = completions.calls[0]
+    payload = json.loads(call["messages"][1]["content"])
+    assert set(payload) == {
+        "language",
+        "task",
+        "original_source",
+        "diagnostic",
+        "validated_candidates",
+        "selection_policy",
+        "required_output",
+    }
+    assert payload["original_source"] == source
+    assert {item["candidate_id"] for item in payload["validated_candidates"]} == {
+        validation.candidate.id for validation in candidates
+    }
+    assert all(item["parser_validation"]["valid"] for item in payload["validated_candidates"])
+    assert "ml_prediction" not in payload
+    assert "replacement_text" not in payload["required_output"]
+    assert call["response_format"] == {"type": "json_object"}
+
+
+def test_parse_candidate_selection_is_strict() -> None:
+    candidate_id = ambiguity_candidate_id(CorrectionAction.DELETE)
+    parsed = parse_candidate_selection(
+        json.dumps(
+            {
+                "selected_candidate_id": candidate_id,
+                "confidence": 0.91,
+                "reason": "Delete the stray opener.",
+            }
+        ),
+        {candidate_id},
+    )
+    assert parsed.selected_candidate_id == candidate_id
+    with pytest.raises(ValueError):
+        parse_candidate_selection(
+            '{"selected_candidate_id":"bad","confidence":0.9,"reason":"x"}',
+            {candidate_id},
+        )
+
+
+def test_single_deterministic_candidate_never_calls_ambiguity_selector() -> None:
+    selector = FakeAmbiguitySelector(selection_result(None))
+    source = "int main(){ return 0 }"
+
+    result = CorrectionOrchestrator(
+        LabelPredictor(CorrectionClass.CORRECT_KEYWORD, 0.70),
+        llm_fallback=selector,
+    ).correct(source)
+
+    assert result.success and result.corrections_applied == 1
+    assert selector.selection_calls == 0
+    assert result.history[0].selected_candidate.token_type == "SEMICOLON"

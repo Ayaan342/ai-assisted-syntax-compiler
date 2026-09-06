@@ -105,10 +105,83 @@ def test_malformed_function_call() -> None:
     assert any(error.unexpected_token == "RPAREN" for error in result.syntax_errors)
 
 
+def test_function_call_comma_recovery_stays_inside_return_expression() -> None:
+    extra = diagnostic(
+        "int add(int x,int y){return x+y;} int main(){return add(1,,2);}"
+    )
+    assert extra.grammar_context == "function_call"
+    deletion = candidate_with_action(extra, CorrectionAction.DELETE)
+    assert deletion.token_type == "COMMA"
+    assert validate_candidate(
+        "int add(int x,int y){return x+y;} int main(){return add(1,,2);}",
+        deletion,
+    ).valid
+
+    source = "int add(int x,int y){return x+y;} int main(){return add(1 2);}"
+    missing = diagnostic(source)
+    assert missing.grammar_context == "function_call"
+    insertion = candidate_with_action(missing, CorrectionAction.INSERT)
+    assert (insertion.token_type, insertion.text) == ("COMMA", ",")
+    assert validate_candidate(source, insertion).valid
+
+
+@pytest.mark.parametrize(
+    "source,token_type",
+    [
+        ("int main(){ return 0; } }", "RBRACE"),
+        ("int main(){ if(true)) { return 0; } }", "RPAREN"),
+        ("int main(){ int a[2]; return a[0]]; }", "RBRACKET"),
+    ],
+)
+def test_surplus_closing_delimiter_generates_valid_local_deletion(
+    source: str, token_type: str
+) -> None:
+    error = diagnostic(source)
+    deletions = [
+        candidate
+        for candidate in error.correction_candidates
+        if candidate.action is CorrectionAction.DELETE
+        and candidate.token_type == token_type
+    ]
+    assert len(deletions) == 1
+    assert validate_candidate(source, deletions[0]).valid
+
+
+def test_duplicate_opening_bracket_generates_valid_local_deletion() -> None:
+    source = "int main(){ int a[2]; int i=0; return a[[i]; }"
+    error = diagnostic(source)
+    deletion = candidate_with_action(error, CorrectionAction.DELETE)
+    assert (deletion.token_type, deletion.token_lexeme) == ("LBRACKET", "[")
+    assert validate_candidate(source, deletion).valid
+
+
+def test_missing_rparen_and_extra_lparen_are_both_compiler_valid() -> None:
+    source = "int main(){ return (0; }"
+    error = diagnostic(source)
+    alternatives = [
+        candidate
+        for candidate in error.correction_candidates
+        if candidate.action in {CorrectionAction.INSERT, CorrectionAction.DELETE}
+    ]
+    assert {(candidate.action, candidate.token_type) for candidate in alternatives} == {
+        (CorrectionAction.INSERT, "RPAREN"),
+        (CorrectionAction.DELETE, "LPAREN"),
+    }
+    assert all(validate_candidate(source, candidate).valid for candidate in alternatives)
+
+
 def test_malformed_array_access() -> None:
     error = diagnostic("int main(){ x = arr[i; return 0; }")
     assert error.grammar_context == "array_access"
     assert candidate_with_action(error, CorrectionAction.INSERT).token_type == "RBRACKET"
+
+
+def test_missing_rbracket_inside_return_keeps_array_access_context() -> None:
+    error = diagnostic("int main(){ int a[2]; int i=0; return a[i; }")
+    assert error.grammar_context == "array_access"
+    candidate = candidate_with_action(error, CorrectionAction.INSERT)
+    assert candidate.token_type == "RBRACKET"
+    assert candidate.text == "]"
 
 
 def test_incomplete_expression() -> None:
@@ -321,4 +394,3 @@ def test_existing_lexer_behavior_is_unchanged() -> None:
     assert tokens[0].type == "IDENTIFIER" and tokens[0].lexeme == "retrun"
     assert tokens[3].type == "IDENTIFIER" and tokens[3].lexeme == "innt"
     assert tokens[6].type == "IDENTIFIER" and tokens[6].lexeme == "whille"
-

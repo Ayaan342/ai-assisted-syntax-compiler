@@ -32,6 +32,11 @@ def correct_source(
             item.llm_fallback is not None and item.llm_fallback.attempted
             for item in result.history
         ),
+        ambiguity_selection_used=any(
+            item.ambiguity_selection is not None
+            and item.ambiguity_selection.attempted
+            for item in result.history
+        ),
         needs_llm_fallback=result.needs_llm_fallback,
         unresolved_syntax_diagnostics=[
             item.to_dict() for item in result.unresolved_diagnostics

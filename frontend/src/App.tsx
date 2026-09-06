@@ -9,7 +9,7 @@ import { ASTView } from "./components/ASTView";
 import { SymbolTableView } from "./components/SymbolTableView";
 import { TokenTable } from "./components/TokenTable";
 import { CorrectionPanel } from "./components/CorrectionPanel";
-import { DEFAULT_CODE, examples } from "./constants/examples";
+import { DEFAULT_CODE } from "./constants/examples";
 import {
   analyzeCode,
   checkHealth,
@@ -26,7 +26,6 @@ import type {
 
 export default function App() {
   const [code, setCode] = useState(DEFAULT_CODE);
-  const [preset, setPreset] = useState("Valid");
   const [health, setHealth] = useState<Health | null>(null);
   const [checking, setChecking] = useState(true);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
@@ -183,7 +182,6 @@ export default function App() {
         onCorrect={() => void run("correct")}
         onReset={() => {
           changeSource(DEFAULT_CODE);
-          setPreset("Valid");
           setAnalysis(null);
           setCorrection(null);
           setTokens(null);
@@ -197,22 +195,6 @@ export default function App() {
           <span className="section-label">WORKSPACE</span>
           <span className="workspace-name">Syntax, explained.</span>
         </div>
-        <label>
-          Example{" "}
-          <select
-            aria-label="Source example"
-            value={preset}
-            onChange={(e) => {
-              setPreset(e.target.value);
-              changeSource(examples[e.target.value]);
-            }}
-          >
-            <option>Valid</option>
-            <option>Missing Semicolon</option>
-            <option>Broken If</option>
-            <option>Misspelled Return</option>
-          </select>
-        </label>
       </div>
       {error && (
         <div role="alert" className="error-banner">
@@ -233,7 +215,10 @@ export default function App() {
               Mini-C <ArrowRight size={12} /> backend analysis
             </span>
           </div>
-          <div className="source-editor">
+          <div
+            className="source-editor"
+            onKeyDown={(event) => event.stopPropagation()}
+          >
             <CodeEditor
               code={code}
               onChange={changeSource}

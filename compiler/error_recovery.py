@@ -118,6 +118,30 @@ def infer_context(tokens: Sequence[TokenInfo], index: int) -> tuple[str, str]:
         default=-1,
     )
     current_statement = types[boundary + 1 :]
+    last_lbracket = max(
+        (i for i, token_type in enumerate(types) if token_type == "LBRACKET"),
+        default=-1,
+    )
+    last_rbracket = max(
+        (i for i, token_type in enumerate(types) if token_type == "RBRACKET"),
+        default=-1,
+    )
+    if last_lbracket > last_rbracket:
+        return "array_access", "expression"
+    last_lparen = max(
+        (i for i, token_type in enumerate(types) if token_type == "LPAREN"),
+        default=-1,
+    )
+    last_rparen = max(
+        (i for i, token_type in enumerate(types) if token_type == "RPAREN"),
+        default=-1,
+    )
+    if (
+        last_lparen > last_rparen
+        and last_lparen > 0
+        and types[last_lparen - 1] == "IDENTIFIER"
+    ):
+        return "function_call", "expression"
     if "RETURN" in current_statement:
         return "return_statement", "return_statement"
     statement_lparen = max(
@@ -135,16 +159,8 @@ def infer_context(tokens: Sequence[TokenInfo], index: int) -> tuple[str, str]:
         and current_statement[0] in {"INT", "FLOAT", "CHAR", "BOOL", "VOID"}
     ):
         return "function_parameter_list", "function_definition"
-    last_lbracket = max((i for i, token_type in enumerate(types) if token_type == "LBRACKET"), default=-1)
-    last_rbracket = max((i for i, token_type in enumerate(types) if token_type == "RBRACKET"), default=-1)
-    if last_lbracket > last_rbracket:
-        return "array_access", "expression"
     if any(token_type in {"INT", "FLOAT", "CHAR", "BOOL", "VOID"} for token_type in current_statement):
         return "declaration", "statement"
-    last_lparen = max((i for i, token_type in enumerate(types) if token_type == "LPAREN"), default=-1)
-    last_rparen = max((i for i, token_type in enumerate(types) if token_type == "RPAREN"), default=-1)
-    if last_lparen > last_rparen and last_lparen > 0 and types[last_lparen - 1] == "IDENTIFIER":
-        return "function_call", "expression"
     if previous and previous[-1].type in {"ASSIGN", "PLUS_ASSIGN", "MINUS_ASSIGN", "TIMES_ASSIGN", "DIVIDE_ASSIGN", "MODULO_ASSIGN"}:
         return "assignment", "expression"
     return "expression", "statement"
@@ -172,6 +188,13 @@ class CandidateGenerator:
 
         def add(action: CorrectionAction, token_type: str | None, token_lexeme: str | None,
                 span: SourceSpan, text: str, reason: str) -> None:
+            if any(
+                candidate.action is action
+                and candidate.span == span
+                and candidate.text == text
+                for candidate in candidates
+            ):
+                return
             candidates.append(
                 CorrectionCandidate(
                     id=f"{diagnostic_id}-C{len(candidates) + 1:02d}",
@@ -188,7 +211,30 @@ class CandidateGenerator:
             )
 
         previous = tokens[index - 1] if index > 0 else None
-        if unexpected is None:
+        surplus_closer = False
+        if unexpected and unexpected.type in DelimiterTracker.reverse:
+            opening_type = DelimiterTracker.reverse[unexpected.type]
+            same_type_balance = sum(
+                1
+                if token.type == opening_type
+                else -1
+                if token.type == unexpected.type
+                else 0
+                for token in tokens[:index]
+            )
+            open_stack = DelimiterTracker(tokens[:index]).unclosed
+            expected_stack_closer = (
+                DelimiterTracker.pairs.get(open_stack[-1].type)
+                if open_stack
+                else None
+            )
+            wrong_type_for_active_opener = expected_stack_closer in expected
+            surplus_closer = (
+                same_type_balance <= 0 and not wrong_type_for_active_opener
+            )
+        if grammar_context == "function_call" and "COMMA" in expected:
+            priorities = ("COMMA", "RPAREN", "SEMICOLON", "LPAREN", "RBRACKET", "RBRACE")
+        elif unexpected is None:
             priorities = ("RBRACE", "RPAREN", "RBRACKET", "SEMICOLON", "LPAREN", "COMMA")
         elif unexpected.type == "LBRACE" and "RPAREN" in expected:
             priorities = ("RPAREN", "SEMICOLON", "LPAREN", "RBRACKET", "RBRACE", "COMMA")
@@ -196,10 +242,15 @@ class CandidateGenerator:
             priorities = self.insert_priority
         for token_type in priorities:
             context_allows = (
-                (token_type == "SEMICOLON" and unexpected is not None)
+                (token_type == "SEMICOLON" and unexpected is not None and not surplus_closer)
                 or (token_type == "RPAREN" and unexpected is not None and unexpected.type in {"LBRACE", "SEMICOLON"})
-                or (token_type == "LPAREN" and grammar_context in {"if_condition", "while_condition", "for_header"})
+                or (
+                    token_type == "LPAREN"
+                    and not surplus_closer
+                    and grammar_context in {"if_condition", "while_condition", "for_header"}
+                )
                 or (token_type == "RBRACKET" and grammar_context == "array_access")
+                or (token_type == "COMMA" and grammar_context == "function_call" and unexpected is not None)
                 or (token_type in {"RBRACE", "RPAREN", "RBRACKET"} and unexpected is None)
             )
             if token_type in expected and context_allows:
@@ -214,10 +265,119 @@ class CandidateGenerator:
                 )
                 break
 
-        if unexpected and unexpected.type == "LBRACKET" and "LPAREN" in expected:
+        if unexpected and surplus_closer:
+            add(
+                CorrectionAction.DELETE,
+                unexpected.type,
+                unexpected.lexeme,
+                unexpected.span,
+                "",
+                "Deleting the unmatched closing delimiter is a structural alternative",
+            )
+
+        if unexpected is None and "RBRACE" in expected and tokens and tokens[-1].type == "RBRACE":
+            opener_index = _matching_opening_index(tokens, len(tokens) - 1)
+            if (
+                opener_index is not None
+                and opener_index > 0
+                and tokens[opener_index - 1].type in {"SEMICOLON", "RBRACE"}
+            ):
+                opener = tokens[opener_index]
+                add(
+                    CorrectionAction.DELETE,
+                    opener.type,
+                    opener.lexeme,
+                    opener.span,
+                    "",
+                    "Deleting the trailing standalone block opener lets its closer close the outer block",
+                )
+
+        if unexpected and previous and unexpected.type == "LBRACKET" and previous.type == "LBRACKET":
+            add(
+                CorrectionAction.DELETE,
+                unexpected.type,
+                unexpected.lexeme,
+                unexpected.span,
+                "",
+                "Consecutive opening brackets contain an extra token",
+            )
+
+        if unexpected and previous and unexpected.type == "COMMA" and previous.type == "COMMA":
+            add(
+                CorrectionAction.DELETE,
+                unexpected.type,
+                unexpected.lexeme,
+                unexpected.span,
+                "",
+                "Consecutive commas contain an extra token",
+            )
+
+        binary_operators = {
+            "PLUS", "MINUS", "TIMES", "DIVIDE", "MODULO", "AND", "OR",
+            "EQ", "NE", "LT", "LE", "GT", "GE",
+        }
+        non_prefix_operators = binary_operators - {"PLUS", "MINUS"}
+        if (
+            unexpected
+            and previous
+            and unexpected.type in non_prefix_operators
+            and previous.type in binary_operators
+        ):
+            add(
+                CorrectionAction.DELETE,
+                unexpected.type,
+                unexpected.lexeme,
+                unexpected.span,
+                "",
+                "Adjacent binary operators make the later operator structurally removable",
+            )
+            add(
+                CorrectionAction.DELETE,
+                previous.type,
+                previous.lexeme,
+                previous.span,
+                "",
+                "Adjacent binary operators make the earlier operator structurally removable",
+            )
+
+        operand_tokens = {
+            "IDENTIFIER", "INTEGER_LITERAL", "FLOAT_LITERAL", "CHAR_LITERAL",
+            "STRING_LITERAL", "TRUE", "FALSE", "RPAREN", "RBRACKET",
+        }
+        if (
+            unexpected
+            and previous
+            and unexpected.type in operand_tokens
+            and previous.type in operand_tokens
+            and "SEMICOLON" in expected
+            and grammar_context in {"declaration", "expression", "return_statement"}
+        ):
+            add(
+                CorrectionAction.DELETE,
+                unexpected.type,
+                unexpected.lexeme,
+                unexpected.span,
+                "",
+                "Adjacent operands make the unexpected operand a removable alternative",
+            )
+
+        bracket_replacement_contexts = {
+            "if_condition", "while_condition", "for_header", "function_call",
+        }
+        if (
+            unexpected
+            and unexpected.type == "LBRACKET"
+            and "LPAREN" in expected
+            and grammar_context in bracket_replacement_contexts
+        ):
             add(CorrectionAction.REPLACE, "LPAREN", unexpected.lexeme, unexpected.span, "(",
                 "A parenthesized condition requires '(' rather than '['")
-        elif unexpected and unexpected.type == "RBRACKET" and "RPAREN" in expected:
+        elif (
+            unexpected
+            and unexpected.type == "RBRACKET"
+            and "RPAREN" in expected
+            and grammar_context in bracket_replacement_contexts
+        ):
             add(CorrectionAction.REPLACE, "RPAREN", unexpected.lexeme, unexpected.span, ")",
                 "The opening parenthesis requires a matching ')'")
 
@@ -278,11 +438,23 @@ class CandidateGenerator:
                 )
                 break
 
-        if unexpected and unexpected.type == "LBRACE" and "RPAREN" in expected:
-            opening = next((token for token in reversed(tokens[:index]) if token.type == "LPAREN"), None)
+        if (
+            unexpected
+            and unexpected.type in {"LBRACE", "SEMICOLON", "RBRACE"}
+            and "RPAREN" in expected
+        ):
+            opening = next(
+                (
+                    token
+                    for token in reversed(DelimiterTracker(tokens[:index]).unclosed)
+                    if token.type == "LPAREN"
+                ),
+                None,
+            )
             if opening:
                 add(CorrectionAction.DELETE, opening.type, opening.lexeme, opening.span, "",
                     "Removing the unmatched opening parenthesis is an alternative interpretation")
+        if unexpected and unexpected.type == "LBRACE" and "RPAREN" in expected:
             add(CorrectionAction.REPLACE, "RPAREN", unexpected.lexeme, unexpected.span, ")",
                 "Replacing the brace would close the condition, though a block brace may still be needed")
 
@@ -294,6 +466,25 @@ class CandidateGenerator:
                 "Deleting the trailing operator yields a complete expression")
 
         return tuple(candidates)
+
+
+def _matching_opening_index(tokens: Sequence[TokenInfo], closing_index: int) -> int | None:
+    """Find the opener matched by one closing delimiter in the token stream."""
+
+    closing = tokens[closing_index].type
+    opening = DelimiterTracker.reverse.get(closing)
+    if opening is None:
+        return None
+    depth = 1
+    for index in range(closing_index - 1, -1, -1):
+        token_type = tokens[index].type
+        if token_type == closing:
+            depth += 1
+        elif token_type == opening:
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
 
 
 def _edit_distance(left: str, right: str) -> int:
