@@ -1,6 +1,6 @@
 # AI-Assisted Syntax Error Detection and Correction Compiler
 
-This repository currently contains **Phases 1 through 8** of a Mini-C compiler
+This repository contains **Phases 1 through 9** of a Mini-C compiler
 front-end: a PLY Lex lexer, an explicitly defined PLY Yacc grammar, source-located
 AST construction and visualization, structured lexical/syntax diagnostics,
 examples, tests, traditional syntax recovery, source correction candidates, and
@@ -8,7 +8,7 @@ model-independent AI context interfaces, a scoped symbol table, and basic semant
 analysis, validated synthetic ML data generation, explainable compiler-context
 features, a Scikit-learn correction classifier, iterative compiler-validated
 automatic correction, a constrained Groq fallback for unresolved errors, and a
-thin FastAPI backend for a future React/Monaco interface.
+FastAPI backend with a React, TypeScript, Vite, and Monaco compiler workbench.
 
 ## Setup
 
@@ -37,6 +37,17 @@ python -m venv .venv
 .\.venv\Scripts\python -m pytest
 ```
 
+In a second terminal, start the Phase 9 workbench:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The frontend expects the API at
+`http://127.0.0.1:8000` by default. See `frontend/.env.example` to override it.
+
 With no mode flag, the CLI defaults to token output for backward compatibility.
 See `docs/mini_c_spec.md` for the language definition and `docs/grammar.md` for the
 CFG and precedence table.
@@ -50,3 +61,5 @@ in `docs/automatic_correction.md`.
 The optional structured Groq fallback is documented in `docs/llm_fallback.md`.
 The FastAPI endpoints, schemas, error policy, and local run instructions are in
 `docs/api.md`.
+The Phase 9 UI architecture, compiler-logic boundary, and verification commands
+are documented in `docs/frontend.md`.
