@@ -15,9 +15,17 @@ export type JsonValue =
   | null
   | JsonValue[]
   | { [key: string]: JsonValue };
+export interface CandidateEdit {
+  action: "INSERT" | "DELETE" | "REPLACE";
+  token_type: string | null;
+  token_lexeme: string | null;
+  offset: number;
+  span: SourceSpan;
+  text: string;
+}
 export interface Candidate {
   id: string;
-  action: "INSERT" | "DELETE" | "REPLACE";
+  action: "INSERT" | "DELETE" | "REPLACE" | "COMPOUND";
   token_type: string | null;
   token_lexeme: string | null;
   offset: number;
@@ -29,6 +37,7 @@ export interface Candidate {
   origin: string;
   parser_validated: boolean | null;
   score: number | null;
+  edits: CandidateEdit[];
 }
 export interface Diagnostic {
   phase: Phase;
@@ -110,7 +119,7 @@ export interface GroqFallback {
   accepted: boolean;
   error: string | null;
   suggestion: {
-    action: Candidate["action"];
+    action: CandidateEdit["action"];
     replacement_text: string;
     target_start: number;
     target_end: number;

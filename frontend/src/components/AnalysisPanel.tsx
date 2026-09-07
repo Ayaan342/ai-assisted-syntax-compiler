@@ -15,6 +15,10 @@ export function AnalysisPanel({
 }) {
   const history = correction?.history[0];
   const diagnostic = selected ?? history?.original_error;
+  const compound =
+    history?.selected_candidate?.action === "COMPOUND"
+      ? history.selected_candidate
+      : null;
   return (
     <aside className="analysis-panel">
       <div className="panel-heading">
@@ -76,7 +80,7 @@ export function AnalysisPanel({
         )}
       </section>
       <section className="panel-section">
-        <div className="section-label">TRADITIONAL RECOVERY</div>
+        <div className="section-label">COMPILER RECOVERY</div>
         {diagnostic?.correction_candidates?.length ? (
           diagnostic.correction_candidates.map((c) => (
             <div className="candidate" key={c.id}>
@@ -89,6 +93,18 @@ export function AnalysisPanel({
           ))
         ) : (
           <p className="muted">No compiler candidates to display.</p>
+        )}
+        {compound && (
+          <div className="candidate">
+            <code>COMPOUND · {compound.id}</code>
+            <strong>{compound.edits.length} atomic edits</strong>
+            {compound.edits.map((edit, index) => (
+              <small key={`${edit.offset}-${index}`}>
+                {edit.action} {JSON.stringify(edit.token_lexeme)}
+                {edit.action !== "DELETE" ? ` → ${JSON.stringify(edit.text)}` : ""}
+              </small>
+            ))}
+          </div>
         )}
       </section>
       <section className="panel-section">

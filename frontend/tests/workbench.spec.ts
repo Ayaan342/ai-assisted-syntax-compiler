@@ -122,6 +122,7 @@ test("Groq ambiguity-selection metadata is visible in correction review", async 
     origin: "traditional_recovery",
     parser_validated: true,
     score: 0.01,
+    edits: [],
   };
   const validation = {
     candidate,
@@ -205,6 +206,213 @@ test("Groq ambiguity-selection metadata is visible in correction review", async 
   await expect(page.locator(".history")).toContainText(
     "Deleting the trailing opener preserves the function structure.",
   );
+});
+
+test("selected compound correction is visible and can be applied", async ({ page }) => {
+  const original = `int main() {
+int x = 10;
+if ((x > 5] {
+    return x;
+}
+
+return 0;
+}`;
+  const corrected = original.replace("if ((x > 5] {", "if ((x > 5)) {");
+  const bracketOffset = original.indexOf("]");
+  const insertOffset = original.indexOf(" {", original.indexOf("if"));
+  const start = { line: 3, column: 5, offset: original.indexOf("((") };
+  const end = { line: 3, column: 12, offset: bracketOffset + 1 };
+  const edits = [
+    {
+      action: "REPLACE",
+      token_type: "RPAREN",
+      token_lexeme: "]",
+      offset: bracketOffset,
+      span: {
+        start: { line: 3, column: 11, offset: bracketOffset },
+        end: { line: 3, column: 12, offset: bracketOffset + 1 },
+      },
+      text: ")",
+    },
+    {
+      action: "INSERT",
+      token_type: "RPAREN",
+      token_lexeme: ")",
+      offset: insertOffset,
+      span: {
+        start: { line: 3, column: 13, offset: insertOffset },
+        end: { line: 3, column: 13, offset: insertOffset },
+      },
+      text: ")",
+    },
+  ];
+  const candidate = {
+    id: "SYN-0001-M01",
+    action: "COMPOUND",
+    token_type: "COMPOUND",
+    token_lexeme: null,
+    offset: start.offset,
+    span: { start, end },
+    text: "",
+    reason: "Replace the mismatched closer and close the remaining local opener",
+    grammar_context: "if_condition",
+    diagnostic_id: "SYN-0001",
+    origin: "compound_recovery",
+    parser_validated: true,
+    score: 0.99,
+    edits,
+  };
+  const diagnostic = {
+    phase: "syntax",
+    code: "UNEXPECTED_TOKEN",
+    message: "Unexpected token RBRACKET; expected RPAREN",
+    line: 3,
+    column: 11,
+    offset: bracketOffset,
+    span: edits[0].span,
+    unexpected_token: "RBRACKET",
+    unexpected_lexeme: "]",
+    expected_tokens: ["RPAREN"],
+    grammar_context: "if_condition",
+  };
+  const validation = {
+    candidate,
+    corrected_source: corrected,
+    valid: true,
+    relevant_valid: true,
+    target_resolved: true,
+    remaining_syntax_errors: 0,
+    remaining_lexical_errors: 0,
+  };
+  await page.route("**/correct", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: true,
+        original_code: original,
+        corrected_code: corrected,
+        fully_syntactically_valid: true,
+        corrections_applied: 1,
+        history: [{
+          sequence: 1,
+          status: "APPLIED",
+          applied: true,
+          diagnostic_id: "SYN-0001",
+          original_error: diagnostic,
+          prediction: { label: "INSERT_RPAREN", confidence: 0.99, probabilities: { INSERT_RPAREN: 0.99 } },
+          selected_candidate: candidate,
+          candidate_rank: 1,
+          candidate_probability: 0.99,
+          before_snippet: original,
+          after_snippet: corrected,
+          source_offset: start.offset,
+          validation,
+          attempts: [],
+          reason: "high_confidence_and_parser_validated",
+          llm_fallback: null,
+          ambiguity_selection: null,
+        }],
+        predictions: [],
+        confidence_values: [],
+        groq_fallback_used: false,
+        ambiguity_selection_used: false,
+        needs_llm_fallback: false,
+        unresolved_syntax_diagnostics: [],
+        semantic_diagnostics: [],
+        stop_reason: "source_is_syntactically_valid",
+      }),
+    }),
+  );
+
+  await page.goto("/");
+  await page.locator(".source-editor .view-lines").click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.insertText(original);
+  await page.getByRole("button", { name: "Correct", exact: true }).click();
+
+  await expect(page.locator(".review-header")).toContainText("1 correction prepared");
+  await expect(page.locator(".history")).toContainText("COMPOUND");
+  await expect(page.locator(".history")).toContainText('REPLACE "]" → ")"');
+  await expect(page.locator(".analysis-panel")).toContainText("2 atomic edits");
+  await expect(page.getByRole("button", { name: "Apply Corrected Code" })).toBeEnabled();
+});
+
+test("invented missing expression remains unresolved and cannot be applied", async ({ page }) => {
+  const source = "int main(){ int x = ; return 0; }";
+  const offset = source.indexOf(";");
+  const location = { line: 1, column: offset + 1, offset };
+  const diagnostic = {
+    phase: "syntax",
+    code: "UNEXPECTED_TOKEN",
+    message: "Unexpected semicolon; expected an expression",
+    line: 1,
+    column: offset + 1,
+    offset,
+    span: { start: location, end: { ...location, column: location.column + 1, offset: offset + 1 } },
+    unexpected_token: "SEMICOLON",
+    unexpected_lexeme: ";",
+    expected_tokens: ["IDENTIFIER", "INTEGER_LITERAL"],
+    grammar_context: "declaration",
+  };
+  await page.route("**/correct", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: false,
+        original_code: source,
+        corrected_code: source,
+        fully_syntactically_valid: false,
+        corrections_applied: 0,
+        history: [{
+          sequence: 1,
+          status: "UNRESOLVED",
+          applied: false,
+          diagnostic_id: "SYN-0001",
+          original_error: diagnostic,
+          prediction: { label: "INSERT_RPAREN", confidence: 0.4, probabilities: { INSERT_RPAREN: 0.4 } },
+          selected_candidate: null,
+          candidate_rank: null,
+          candidate_probability: null,
+          before_snippet: source,
+          after_snippet: null,
+          source_offset: offset,
+          validation: null,
+          attempts: [],
+          reason: "no_safe_candidate",
+          llm_fallback: {
+            attempted: true,
+            available: true,
+            model: "mock-groq",
+            accepted: false,
+            error: "Unsafe LLM suggestion: semantic_content_invention_is_forbidden",
+            suggestion: { action: "INSERT", replacement_text: "0", target_start: offset, target_end: offset, reason: "Invent zero" },
+            validation: null,
+          },
+          ambiguity_selection: null,
+        }],
+        predictions: [],
+        confidence_values: [],
+        groq_fallback_used: true,
+        ambiguity_selection_used: false,
+        needs_llm_fallback: true,
+        unresolved_syntax_diagnostics: [diagnostic],
+        semantic_diagnostics: [],
+        stop_reason: "no_safe_candidate",
+      }),
+    }),
+  );
+
+  await page.goto("/");
+  await page.locator(".source-editor .view-lines").click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.insertText(source);
+  await page.getByRole("button", { name: "Correct", exact: true }).click();
+
+  await expect(page.locator(".review-header")).toContainText("0 corrections prepared");
+  await expect(page.locator(".history")).toContainText("UNRESOLVED");
+  await expect(page.getByRole("button", { name: "Apply Corrected Code" })).toBeDisabled();
 });
 
 test("offline and missing-model errors are safe and recoverable", async ({

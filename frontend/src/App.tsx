@@ -8,7 +8,10 @@ import { InspectorTabs, tabs, type Tab } from "./components/InspectorTabs";
 import { ASTView } from "./components/ASTView";
 import { SymbolTableView } from "./components/SymbolTableView";
 import { TokenTable } from "./components/TokenTable";
-import { CorrectionPanel } from "./components/CorrectionPanel";
+import {
+  CorrectionPanel,
+  canApplyCorrection,
+} from "./components/CorrectionPanel";
 import { DEFAULT_CODE } from "./constants/examples";
 import {
   analyzeCode,
@@ -167,7 +170,12 @@ export default function App() {
     editor.current?.focus();
   }
   function applyCorrection() {
-    if (!correction || current.current !== correction.original_code) return;
+    if (
+      !correction ||
+      current.current !== correction.original_code ||
+      !canApplyCorrection(correction)
+    )
+      return;
     const value = correction.corrected_code;
     changeSource(value);
     void run("analyze", value);

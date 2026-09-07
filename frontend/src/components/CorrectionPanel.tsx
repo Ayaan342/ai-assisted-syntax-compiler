@@ -1,5 +1,31 @@
 import { CodeEditor } from "./CodeEditor";
-import type { CorrectionResponse } from "../types/compiler";
+import type { Candidate, CandidateEdit, CorrectionResponse } from "../types/compiler";
+
+export function canApplyCorrection(result: CorrectionResponse) {
+  return (
+    result.original_code !== result.corrected_code &&
+    result.corrections_applied > 0 &&
+    result.fully_syntactically_valid &&
+    result.history.some(
+      (item) => item.status === "APPLIED" && item.validation?.relevant_valid,
+    )
+  );
+}
+
+function describeEdit(edit: CandidateEdit) {
+  if (edit.action === "INSERT") return `INSERT ${JSON.stringify(edit.text)}`;
+  if (edit.action === "DELETE") return `DELETE ${JSON.stringify(edit.token_lexeme)}`;
+  return `REPLACE ${JSON.stringify(edit.token_lexeme)} → ${JSON.stringify(edit.text)}`;
+}
+
+function candidateDetail(candidate: Candidate | null) {
+  if (!candidate) return "";
+  if (candidate.action === "COMPOUND")
+    return candidate.edits.map(describeEdit).join(" + ");
+  return candidate.text
+    ? JSON.stringify(candidate.text)
+    : candidate.token_lexeme ?? "";
+}
 export function CorrectionPanel({
   result,
   onApply,
@@ -16,7 +42,7 @@ export function CorrectionPanel({
         </span>
       </div>
     );
-  const changed = result.original_code !== result.corrected_code;
+  const canApply = canApplyCorrection(result);
   return (
     <div className="correction-panel">
       <div className="review-header">
@@ -32,7 +58,7 @@ export function CorrectionPanel({
             · Editor unchanged
           </span>
         </div>
-        <button className="primary" disabled={!changed} onClick={onApply}>
+        <button className="primary" disabled={!canApply} onClick={onApply}>
           Apply Corrected Code
         </button>
       </div>
@@ -52,11 +78,7 @@ export function CorrectionPanel({
             <div className="history-title">
               <strong>
                 {h.selected_candidate?.action ?? "UNRESOLVED"}{" "}
-                <code>
-                  {h.selected_candidate?.text
-                    ? JSON.stringify(h.selected_candidate.text)
-                    : h.selected_candidate?.token_lexeme}
-                </code>
+                <code>{candidateDetail(h.selected_candidate)}</code>
               </strong>
               <span
                 className={h.validation?.relevant_valid ? "accent" : "warning"}
