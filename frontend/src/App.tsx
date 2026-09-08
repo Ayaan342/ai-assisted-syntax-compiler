@@ -184,6 +184,7 @@ export default function App() {
     <main className="app-shell">
       <Toolbar
         health={health}
+        analysis={analysis}
         checking={checking}
         busy={busy}
         onAnalyze={() => void run("analyze")}

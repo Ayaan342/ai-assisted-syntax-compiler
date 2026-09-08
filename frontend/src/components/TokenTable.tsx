@@ -2,6 +2,7 @@ import type { Token } from "../types/compiler";
 export function TokenTable({ tokens }: { tokens: Token[] | null }) {
   return tokens ? (
     <table>
+      <caption className="sr-only">Compiler token stream</caption>
       <thead>
         <tr>
           <th>#</th>

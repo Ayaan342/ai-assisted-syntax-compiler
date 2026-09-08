@@ -1,5 +1,6 @@
 import { WarningCircle, CheckCircle } from "@phosphor-icons/react";
 import type { Diagnostic, Phase } from "../types/compiler";
+import { diagnosticSummary } from "../utils/correctionPresentation";
 export function DiagnosticList({
   diagnostics,
   onSelect,
@@ -34,20 +35,27 @@ export function DiagnosticList({
                 {phase.toUpperCase()} <span>{group.length}</span>
               </h3>
               {group.map((d, i) => (
-                <button
-                  className="diagnostic-row"
-                  key={`${d.code}-${i}`}
-                  onClick={() => onSelect(d)}
-                >
-                  <WarningCircle size={18} />
-                  <span>
-                    <strong>{d.code}</strong>
-                    <span>{d.message}</span>
-                  </span>
-                  <code>
-                    Ln {d.line}:{d.column}
-                  </code>
-                </button>
+                <article className="diagnostic-item" key={`${d.code}-${i}`}>
+                  <button
+                    className="diagnostic-row"
+                    onClick={() => onSelect(d)}
+                  >
+                    <WarningCircle size={18} />
+                    <span>
+                      <strong>{diagnosticSummary(d)}</strong>
+                      <span>
+                        {d.code} · {d.phase}
+                      </span>
+                    </span>
+                    <code>
+                      Ln {d.line}:{d.column}
+                    </code>
+                  </button>
+                  <details className="diagnostic-detail">
+                    <summary>Technical compiler detail</summary>
+                    <p>{d.message}</p>
+                  </details>
+                </article>
               ))}
             </section>
           )

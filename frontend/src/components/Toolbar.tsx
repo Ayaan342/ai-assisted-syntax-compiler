@@ -5,9 +5,10 @@ import {
   Wrench,
   ArrowClockwise,
 } from "@phosphor-icons/react";
-import type { Health } from "../types/compiler";
+import type { AnalysisResponse, Health } from "../types/compiler";
 export function Toolbar({
   health,
+  analysis,
   checking,
   busy,
   onAnalyze,
@@ -16,6 +17,7 @@ export function Toolbar({
   onRetry,
 }: {
   health: Health | null;
+  analysis: AnalysisResponse | null;
   checking: boolean;
   busy: string | null;
   onAnalyze: () => void;
@@ -23,6 +25,19 @@ export function Toolbar({
   onReset: () => void;
   onRetry: () => void;
 }) {
+  const hasSyntaxErrors = !!analysis && !analysis.syntax.success;
+  const semanticOnly =
+    !!analysis &&
+    analysis.syntax.success &&
+    analysis.semantic.ran &&
+    analysis.semantic.success === false;
+  const sourceIsValid = analysis?.success === true;
+  const correctDisabled = !!busy || semanticOnly || sourceIsValid;
+  const correctTitle = semanticOnly
+    ? "Semantic errors require manual code changes"
+    : sourceIsValid
+      ? "No syntax correction is needed"
+      : "Prepare compiler-validated corrections";
   return (
     <header className="toolbar">
       <div className="brand">
@@ -48,37 +63,26 @@ export function Toolbar({
               : "Backend offline"}
           <ArrowClockwise size={12} />
         </button>
-        <span>
-          ML{" "}
-          <b>
-            {health
-              ? health.ml_model_loaded
-                ? "ready"
-                : "unavailable"
-              : "unknown"}
-          </b>
-        </span>
-        <span>
-          Groq{" "}
-          <b>
-            {health
-              ? health.groq_configured
-                ? "configured"
-                : "unavailable"
-              : "unknown"}
-          </b>
-        </span>
       </div>
       <nav className="toolbar-actions" aria-label="Compiler actions">
         <button onClick={onReset} title="Restore default source">
           <ArrowCounterClockwise />
           Reset
         </button>
-        <button disabled={!!busy} onClick={onAnalyze}>
+        <button
+          className={!analysis ? "primary" : ""}
+          disabled={!!busy}
+          onClick={onAnalyze}
+        >
           <Play weight="fill" />
           {busy === "analyze" ? "Analyzing…" : "Analyze"}
         </button>
-        <button className="primary" disabled={!!busy} onClick={onCorrect}>
+        <button
+          className={hasSyntaxErrors ? "primary" : ""}
+          disabled={correctDisabled}
+          title={correctTitle}
+          onClick={onCorrect}
+        >
           <Wrench />
           {busy === "correct" ? "Correcting…" : "Correct"}
         </button>

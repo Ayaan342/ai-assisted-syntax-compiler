@@ -1,9 +1,89 @@
-import { Check, Circle, Cpu, WarningCircle } from "@phosphor-icons/react";
+import {
+  Check,
+  Circle,
+  Cpu,
+  ShieldCheck,
+  WarningCircle,
+} from "@phosphor-icons/react";
 import type {
   AnalysisResponse,
+  Candidate,
+  CorrectionHistory,
   CorrectionResponse,
   Diagnostic,
+  Validation,
 } from "../types/compiler";
+import {
+  candidateEdits,
+  describeCandidate,
+  describeEdit,
+  diagnosticSummary,
+  safeProviderOutcome,
+  validatedAttempts,
+} from "../utils/correctionPresentation";
+
+function CandidateBreakdown({ candidate }: { candidate: Candidate }) {
+  return (
+    <div className="decision-candidate">
+      <div>
+        <strong>{describeCandidate(candidate)}</strong>
+        <code>{candidate.id}</code>
+      </div>
+      {candidate.action === "COMPOUND" && (
+        <span>{candidate.edits.length} coordinated edits</span>
+      )}
+      <ol>
+        {candidateEdits(candidate).map((edit, index) => (
+          <li key={`${edit.offset}-${index}`}>
+            <span>{describeEdit(edit)}</span>
+            <small>
+              Ln {edit.span.start.line}:{edit.span.start.column}
+            </small>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function finalValidation(history: CorrectionHistory | undefined) {
+  return (
+    history?.validation ??
+    history?.ambiguity_selection?.validation ??
+    history?.llm_fallback?.validation ??
+    null
+  );
+}
+
+function ValidationStage({
+  validation,
+  history,
+}: {
+  validation: Validation | null;
+  history: CorrectionHistory | undefined;
+}) {
+  const passed = validation?.relevant_valid === true;
+  return (
+    <div className="decision-stage">
+      <div className="decision-stage-heading">
+        <strong>Final compiler validation</strong>
+        <span className={passed ? "stage-result accent" : "stage-result muted"}>
+          {validation ? (passed ? "Passed" : "Failed") : "Not run"}
+        </span>
+      </div>
+      <p>
+        {validation
+          ? passed
+            ? "The selected edit was re-lexed and re-parsed successfully."
+            : "The selected edit did not pass compiler validation."
+          : history
+            ? "No candidate was selected, so final validation was not applicable."
+            : "Run Correct to validate a compiler-supported edit."}
+      </p>
+    </div>
+  );
+}
+
 export function AnalysisPanel({
   analysis,
   correction,
@@ -13,12 +93,51 @@ export function AnalysisPanel({
   correction: CorrectionResponse | null;
   selected: Diagnostic | null;
 }) {
-  const history = correction?.history[0];
+  const history =
+    correction?.history.find(
+      (item) => item.diagnostic_id === selected?.diagnostic_id,
+    ) ?? correction?.history[0];
   const diagnostic = selected ?? history?.original_error;
-  const compound =
-    history?.selected_candidate?.action === "COMPOUND"
-      ? history.selected_candidate
+  const attempts = validatedAttempts(history);
+  const candidatePool = attempts.map(
+    (attempt) => attempt.ranked_candidate.candidate,
+  );
+  if (
+    history?.selected_candidate &&
+    !candidatePool.some(
+      (candidate) => candidate.id === history.selected_candidate?.id,
+    )
+  ) {
+    candidatePool.push(history.selected_candidate);
+  }
+  const displayedCandidates = history
+    ? candidatePool
+    : diagnostic?.correction_candidates ?? [];
+  const validation = finalValidation(history);
+  const selectedCandidate = history?.selected_candidate ?? null;
+  const correctionReady =
+    !!correction &&
+    correction.corrections_applied > 0 &&
+    correction.fully_syntactically_valid &&
+    validation?.relevant_valid === true;
+
+  const ambiguity = history?.ambiguity_selection;
+  const fallback = history?.llm_fallback;
+  const aiLabel = ambiguity ? "AI intent selection" : "AI structural fallback";
+  const aiOutcome = ambiguity
+    ? !ambiguity.available
+      ? "Unavailable"
+      : ambiguity.accepted
+        ? "Selected"
+        : safeProviderOutcome(ambiguity.error) ?? "Uncertain"
+    : fallback
+      ? !fallback.available
+        ? "Unavailable"
+        : fallback.accepted
+          ? "Accepted"
+          : safeProviderOutcome(fallback.error) ?? "Rejected"
       : null;
+
   return (
     <aside className="analysis-panel">
       <div className="panel-heading">
@@ -49,147 +168,141 @@ export function AnalysisPanel({
           </div>
         ))}
       </div>
-      <section className="panel-section">
-        <div className="section-label">COMPILER DIAGNOSTIC</div>
-        {diagnostic ? (
-          <>
-            <h3 className="warning">
-              {diagnostic.phase} error{" "}
-              <small>
-                Ln {diagnostic.line}:{diagnostic.column}
-              </small>
-            </h3>
-            <code className="diagnostic-code">{diagnostic.code}</code>
-            {diagnostic.unexpected_lexeme && (
-              <div className="key-value">
-                <span>Found</span>
-                <code>{JSON.stringify(diagnostic.unexpected_lexeme)}</code>
+
+      <section className="panel-section decision-section">
+        <div className="section-label">CORRECTION DECISION</div>
+
+        <div className="decision-stage">
+          <div className="decision-stage-heading">
+            <strong>Compiler evidence</strong>
+            <span className="stage-result">
+              {history
+                ? `${displayedCandidates.length} valid candidate${displayedCandidates.length === 1 ? "" : "s"}`
+                : `${displayedCandidates.length} candidate${displayedCandidates.length === 1 ? "" : "s"}`}
+            </span>
+          </div>
+          {diagnostic ? (
+            <>
+              <div className="diagnostic-summary">
+                <strong className="warning">{diagnosticSummary(diagnostic)}</strong>
+                {diagnostic.unexpected_lexeme && (
+                  <span>
+                    Found <code>{JSON.stringify(diagnostic.unexpected_lexeme)}</code>
+                  </span>
+                )}
+                <small>
+                  {diagnostic.code} · Ln {diagnostic.line}:{diagnostic.column} ·{" "}
+                  {diagnostic.phase}
+                </small>
+              </div>
+              <details className="message-detail">
+                <summary>Technical compiler detail</summary>
+                <p>{diagnostic.message}</p>
+              </details>
+            </>
+          ) : (
+            <p>
+              {analysis?.success
+                ? "Source passed all compiler checks."
+                : "Analyze the source to collect compiler evidence."}
+            </p>
+          )}
+          {displayedCandidates.length > 0 && (
+            <div className="candidate-pool">
+              {displayedCandidates.map((candidate) => (
+                <div
+                  className={`candidate-option ${selectedCandidate?.id === candidate.id ? "selected" : ""}`}
+                  key={candidate.id}
+                >
+                  <span>{describeCandidate(candidate)}</span>
+                  <code>{candidate.id}</code>
+                  {candidate.action === "COMPOUND" && (
+                    <small>{candidate.edits.length} coordinated edits</small>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="decision-stage">
+          <div className="decision-stage-heading">
+            <strong>ML ranking</strong>
+            <span className="stage-result">
+              {history
+                ? ambiguity || fallback
+                  ? "Inconclusive"
+                  : selectedCandidate
+                    ? "Candidate selected"
+                    : "No selection"
+                : "Not run"}
+            </span>
+          </div>
+          {history ? (
+            <div className="decision-values">
+              <code>{history.prediction.label}</code>
+              <span>{(history.prediction.confidence * 100).toFixed(1)}%</span>
+            </div>
+          ) : (
+            <p>Run Correct to rank compiler-generated candidates.</p>
+          )}
+        </div>
+
+        {aiOutcome && (
+          <div className="decision-stage">
+            <div className="decision-stage-heading">
+              <strong>{aiLabel}</strong>
+              <span
+                className={`stage-result ${ambiguity?.accepted || fallback?.accepted ? "accent" : "warning"}`}
+              >
+                {aiOutcome}
+              </span>
+            </div>
+            {ambiguity?.confidence != null && (
+              <div className="decision-values">
+                <span>Selection confidence</span>
+                <code>{(ambiguity.confidence * 100).toFixed(1)}%</code>
               </div>
             )}
-            <details className="message-detail">
-              <summary>Full compiler message</summary>
-              <p>{diagnostic.message}</p>
-            </details>
-          </>
-        ) : (
-          <p className="muted">
-            {analysis?.success
-              ? "Source passed all compiler checks."
-              : "Analyze the source to inspect its first diagnostic."}
-          </p>
-        )}
-      </section>
-      <section className="panel-section">
-        <div className="section-label">COMPILER RECOVERY</div>
-        {diagnostic?.correction_candidates?.length ? (
-          diagnostic.correction_candidates.map((c) => (
-            <div className="candidate" key={c.id}>
-              <code>{c.action}</code>
-              <strong>
-                {c.text ? JSON.stringify(c.text) : c.token_lexeme}
-              </strong>
-              <small>{c.reason}</small>
-            </div>
-          ))
-        ) : (
-          <p className="muted">No compiler candidates to display.</p>
-        )}
-        {compound && (
-          <div className="candidate">
-            <code>COMPOUND · {compound.id}</code>
-            <strong>{compound.edits.length} atomic edits</strong>
-            {compound.edits.map((edit, index) => (
-              <small key={`${edit.offset}-${index}`}>
-                {edit.action} {JSON.stringify(edit.token_lexeme)}
-                {edit.action !== "DELETE" ? ` → ${JSON.stringify(edit.text)}` : ""}
-              </small>
-            ))}
+            <p>
+              {ambiguity?.reason ??
+                (fallback?.accepted ? fallback.suggestion?.reason : null) ??
+                (aiOutcome === "Provider unavailable"
+                  ? "The provider could not complete this selection."
+                  : aiOutcome === "Suggestion rejected by safety policy"
+                    ? "Compiler evidence did not support the proposed edit."
+                    : "No reliable AI selection was accepted.")}
+            </p>
           </div>
         )}
-      </section>
-      <section className="panel-section">
-        <div className="section-label">ML PREDICTION</div>
-        <strong className="prediction">
-          {history?.prediction.label ?? "Awaiting correction"}
-        </strong>
-        <div className="key-value">
-          <span>Model confidence</span>
-          <code>
-            {history
-              ? `${(history.prediction.confidence * 100).toFixed(1)}%`
-              : "Not run"}
-          </code>
-        </div>
-        <div className="key-value">
-          <span>Groq fallback</span>
-          <span>
-            {history?.llm_fallback
-              ? !history.llm_fallback.available
-                ? "Unavailable"
-                : history.llm_fallback.attempted
-                  ? "Used"
-                  : "Not used"
-              : "Not used"}
-          </span>
-        </div>
-        <div className="key-value">
-          <span>Groq intent selection</span>
-          <span>
-            {history?.ambiguity_selection
-              ? !history.ambiguity_selection.available
-                ? "Unavailable"
-                : history.ambiguity_selection.attempted
-                  ? history.ambiguity_selection.accepted
-                    ? "Selected"
-                    : "Unresolved"
-                  : "Not used"
-              : "Not used"}
-          </span>
-        </div>
-        {history?.ambiguity_selection && (
-          <>
-            <div className="key-value">
-              <span>Selected candidate</span>
-              <code>
-                {history.ambiguity_selection.selected_candidate_id ?? "None"}
-              </code>
-            </div>
-            <div className="key-value">
-              <span>Selection confidence</span>
-              <code>
-                {history.ambiguity_selection.confidence == null
-                  ? "Unavailable"
-                  : `${(history.ambiguity_selection.confidence * 100).toFixed(1)}%`}
-              </code>
-            </div>
-            <p className="muted">
-              {history.ambiguity_selection.reason ??
-                history.ambiguity_selection.error ??
-                "No selection reason returned."}
+
+        <ValidationStage validation={validation} history={history} />
+
+        <div className="decision-stage final-result">
+          <div className="decision-stage-heading">
+            <strong>Final result</strong>
+            <span className={`stage-result ${correctionReady ? "accent" : "muted"}`}>
+              {correctionReady ? "Ready to apply" : "No correction ready"}
+            </span>
+          </div>
+          {selectedCandidate ? (
+            <CandidateBreakdown candidate={selectedCandidate} />
+          ) : (
+            <p>
+              {history
+                ? "The original source remains unchanged."
+                : "No correction decision has been requested."}
             </p>
-          </>
-        )}
-        <div className="key-value">
-          <span>Parser validation</span>
-          <span className={history?.validation?.relevant_valid ? "accent" : ""}>
-            {history?.validation
-              ? history.validation.relevant_valid
-                ? "Passed"
-                : "Failed"
-              : history?.llm_fallback?.validation
-                ? "Failed"
-                : history?.ambiguity_selection?.validation
-                  ? history.ambiguity_selection.validation.relevant_valid
-                    ? "Passed"
-                    : "Failed"
-                : "Not run"}
-          </span>
+          )}
         </div>
       </section>
+
       <div className="panel-note">
-        The model proposes. The compiler validates.
-        <br />
-        Review source changes before applying.
+        <ShieldCheck size={14} />
+        <span>
+          Compiler validation is authoritative. ML and AI only rank or select
+          supported repairs.
+        </span>
       </div>
     </aside>
   );

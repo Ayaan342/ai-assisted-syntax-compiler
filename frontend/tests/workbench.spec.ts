@@ -17,6 +17,10 @@ test("lowercase a remains normal Monaco input and never runs Analyze", async ({
   });
 
   await page.goto("/");
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/desktop-initial.png",
+    fullPage: true,
+  });
   await page.locator(".source-editor .view-lines").click();
   await page.keyboard.press("Control+A");
   await page.keyboard.press("a");
@@ -70,7 +74,7 @@ test("real backend analysis, Monaco markers, and all data inspectors", async ({
   );
   await page.locator(".diagnostic-row").first().click();
   await page.screenshot({
-    path: "test-results/workbench-diagnostic.png",
+    path: "../audit/ui-ux-polish/diagnostics.png",
     fullPage: true,
   });
 });
@@ -87,13 +91,16 @@ test("real ML correction is reviewed before explicitly applying", async ({
   await expect(page.getByRole("status")).toContainText(
     "Source has not changed",
   );
-  await expect(page.locator(".history")).toContainText("INSERT_RPAREN");
-  await expect(page.locator(".history")).toContainText("Groq not used");
+  await expect(page.locator(".history")).toContainText('Insert ")"');
+  await expect(page.locator(".history")).toContainText("Validated");
+  await expect(page.locator(".analysis-panel")).toContainText(
+    "Compiler validation is authoritative",
+  );
   await expect(
     page.locator(".source-editor .squiggly-error").first(),
   ).toBeVisible();
   await page.screenshot({
-    path: "test-results/workbench-correction.png",
+    path: "../audit/ui-ux-polish/deterministic-correction.png",
     fullPage: true,
   });
   await page.getByRole("button", { name: "Apply Corrected Code" }).click();
@@ -201,11 +208,18 @@ test("Groq ambiguity-selection metadata is visible in correction review", async 
   await page.goto("/");
   await page.getByRole("button", { name: "Correct", exact: true }).click();
 
-  await expect(page.locator(".history")).toContainText("Intent selector selected");
-  await expect(page.locator(".history")).toContainText("91.0% selector");
-  await expect(page.locator(".history")).toContainText(
+  await expect(page.locator(".analysis-panel")).toContainText(
+    "AI intent selection",
+  );
+  await expect(page.locator(".analysis-panel")).toContainText("Selected");
+  await expect(page.locator(".analysis-panel")).toContainText("91.0%");
+  await expect(page.locator(".analysis-panel")).toContainText(
     "Deleting the trailing opener preserves the function structure.",
   );
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/ambiguity-selection.png",
+    fullPage: true,
+  });
 });
 
 test("selected compound correction is visible and can be applied", async ({ page }) => {
@@ -331,11 +345,17 @@ return 0;
   await page.keyboard.insertText(original);
   await page.getByRole("button", { name: "Correct", exact: true }).click();
 
-  await expect(page.locator(".review-header")).toContainText("1 correction prepared");
-  await expect(page.locator(".history")).toContainText("COMPOUND");
-  await expect(page.locator(".history")).toContainText('REPLACE "]" → ")"');
-  await expect(page.locator(".analysis-panel")).toContainText("2 atomic edits");
+  await expect(page.locator(".review-header")).toContainText("1 validated correction ready");
+  await expect(page.locator(".history")).toContainText("Compound correction");
+  await expect(page.locator(".history")).toContainText('Replace "]" with ")"');
+  await expect(page.locator(".analysis-panel")).toContainText("2 coordinated edits");
+  await expect(page.locator(".inline-diff")).toContainText("if ((x > 5] {");
+  await expect(page.locator(".inline-diff")).toContainText("if ((x > 5)) {");
   await expect(page.getByRole("button", { name: "Apply Corrected Code" })).toBeEnabled();
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/compound-correction.png",
+    fullPage: true,
+  });
 });
 
 test("invented missing expression remains unresolved and cannot be applied", async ({ page }) => {
@@ -410,9 +430,20 @@ test("invented missing expression remains unresolved and cannot be applied", asy
   await page.keyboard.insertText(source);
   await page.getByRole("button", { name: "Correct", exact: true }).click();
 
-  await expect(page.locator(".review-header")).toContainText("0 corrections prepared");
-  await expect(page.locator(".history")).toContainText("UNRESOLVED");
+  await expect(page.locator(".review-header")).toContainText("No validated correction is ready");
+  await expect(page.locator(".review-header")).toContainText(
+    "AI suggestion was rejected because compiler evidence did not support it",
+  );
+  await expect(page.locator(".analysis-panel")).toContainText(
+    "Suggestion rejected by safety policy",
+  );
+  await expect(page.locator(".analysis-panel")).not.toContainText("Invent zero");
+  await expect(page.locator(".history")).toContainText("Unresolved");
   await expect(page.getByRole("button", { name: "Apply Corrected Code" })).toBeDisabled();
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/unsafe-unresolved.png",
+    fullPage: true,
+  });
 });
 
 test("offline and missing-model errors are safe and recoverable", async ({
@@ -461,6 +492,11 @@ test("narrow workspace stacks without horizontal page overflow", async ({
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await expect(page.locator(".source-editor .monaco-editor")).toBeVisible();
+  await expect(page.getByText("Backend connected", { exact: true })).toBeVisible();
+  await expect(page.locator(".connections")).not.toContainText("ML");
+  await expect(page.locator(".connections")).not.toContainText("Groq");
+  await expect(page.getByRole("tab", { name: "Corrections" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Diagnostics/ })).toBeVisible();
   const editor = await page.locator(".editor-panel").boundingBox();
   const panel = await page.locator(".analysis-panel").boundingBox();
   expect(panel!.y).toBeGreaterThan(editor!.y);
@@ -470,7 +506,95 @@ test("narrow workspace stacks without horizontal page overflow", async ({
     ),
   ).toBe(true);
   await page.screenshot({
-    path: "test-results/workbench-mobile.png",
+    path: "../audit/ui-ux-polish/mobile.png",
     fullPage: true,
   });
+});
+
+test("semantic-only analysis keeps compiler correction unavailable", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.locator(".source-editor .view-lines").click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.insertText(
+    "int main(){ int x = 1; return missing; }",
+  );
+  await page.getByRole("button", { name: "Analyze", exact: true }).click();
+
+  const correct = page.getByRole("button", { name: "Correct", exact: true });
+  await expect(page.getByRole("status")).toContainText("Diagnostics available");
+  await expect(page.locator(".analysis-panel")).toContainText("semantic");
+  await expect(correct).toBeDisabled();
+  await expect(correct).toHaveAttribute(
+    "title",
+    "Semantic errors require manual code changes",
+  );
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/semantic-error.png",
+    fullPage: true,
+  });
+});
+
+test("tablet stacks while desktop preserves the split workbench", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 1000 });
+  await page.goto("/");
+  let editor = await page.locator(".editor-panel").boundingBox();
+  let panel = await page.locator(".analysis-panel").boundingBox();
+  expect(panel!.y).toBeGreaterThan(editor!.y);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    900,
+  );
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/tablet.png",
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  editor = await page.locator(".editor-panel").boundingBox();
+  panel = await page.locator(".analysis-panel").boundingBox();
+  expect(Math.abs(panel!.y - editor!.y)).toBeLessThan(2);
+  expect(panel!.x).toBeGreaterThan(editor!.x);
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/desktop-1440x900.png",
+    fullPage: true,
+  });
+});
+
+test("multiple deterministic fixes form a numbered correction history", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.locator(".source-editor .view-lines").click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.insertText("int main(){ int x = 1 return x }");
+  await page.getByRole("button", { name: "Correct", exact: true }).click();
+
+  await expect(page.locator(".history article")).toHaveCount(2);
+  await expect(page.locator(".history")).toContainText("Correction 1");
+  await expect(page.locator(".history")).toContainText("Correction 2");
+  await expect(page.locator(".history")).toContainText("Validated");
+  await page.screenshot({
+    path: "../audit/ui-ux-polish/correction-history.png",
+    fullPage: true,
+  });
+});
+
+test("backend tables expose accessible captions", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Analyze", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("All checks passed");
+  await page.getByRole("tab", { name: "Tokens" }).click();
+  await expect(
+    page.getByRole("cell", { name: "INTEGER_LITERAL", exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    page.locator("caption").filter({ hasText: "Compiler token stream" }),
+  ).toBeAttached();
+  await page.getByRole("tab", { name: "Symbol Table" }).click();
+  await expect(
+    page.locator("caption").filter({ hasText: "Symbols in the global scope" }),
+  ).toBeAttached();
 });

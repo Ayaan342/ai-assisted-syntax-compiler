@@ -7,6 +7,9 @@ function ScopeView({ scope }: { scope: Scope }) {
       </summary>
       {scope.symbols.length > 0 && (
         <table>
+          <caption className="sr-only">
+            Symbols in the {scope.name} scope
+          </caption>
           <thead>
             <tr>
               <th>NAME</th>

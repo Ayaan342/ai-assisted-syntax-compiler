@@ -125,6 +125,7 @@ export interface GroqFallback {
     target_end: number;
     reason: string;
   } | null;
+  candidate?: Candidate | null;
   validation: Validation | null;
 }
 export interface GroqAmbiguitySelection {
@@ -138,6 +139,23 @@ export interface GroqAmbiguitySelection {
   validation: Validation | null;
   accepted: boolean;
   error: string | null;
+}
+export interface RankedCandidate {
+  candidate: Candidate;
+  compatibility_score: number;
+  matched_class: string | null;
+  matched_classes: string[];
+  predicted_class_match: boolean;
+  grammar_context_match: boolean;
+  parser_validated: boolean | null;
+  original_index: number;
+}
+export interface CandidateAttempt {
+  rank: number;
+  ranked_candidate: RankedCandidate;
+  validation: Validation | null;
+  accepted: boolean;
+  rejection_reason: string | null;
 }
 export interface CorrectionHistory {
   sequence: number;
@@ -153,6 +171,7 @@ export interface CorrectionHistory {
   after_snippet: string | null;
   source_offset: number;
   validation: Validation | null;
+  attempts?: CandidateAttempt[];
   reason: string | null;
   llm_fallback: GroqFallback | null;
   ambiguity_selection: GroqAmbiguitySelection | null;
