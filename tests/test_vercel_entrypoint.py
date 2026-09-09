@@ -32,6 +32,24 @@ def test_vercel_mount_exposes_backend_only_under_api_prefix() -> None:
     assert request("GET", "/health").status_code == 404
 
 
+def test_vercel_adapter_exposes_the_complete_external_api_route_shape() -> None:
+    routes = {
+        "/health": "GET",
+        "/analyze": "POST",
+        "/correct": "POST",
+        "/tokens": "POST",
+        "/ast": "POST",
+        "/symbols": "POST",
+    }
+
+    for route, method in routes.items():
+        kwargs = {} if method == "GET" else {"json": {"code": "int main(){return 0;}"}}
+        assert request(method, f"/api{route}", **kwargs).status_code == 200
+        assert request(method, route, **kwargs).status_code == 404
+
+    assert request("GET", "/api/api/health").status_code == 404
+
+
 def test_vercel_configuration_selects_the_api_adapter_explicitly() -> None:
     configuration = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
@@ -45,3 +63,6 @@ def test_vercel_build_runs_the_frontend_from_the_repository_root() -> None:
     assert configuration["installCommand"] == "npm --prefix frontend ci"
     assert configuration["buildCommand"] == "npm --prefix frontend run build"
     assert configuration["outputDirectory"] == "frontend/dist"
+    assert configuration["rewrites"] == [
+        {"source": "/api/:path*", "destination": "/api/index"}
+    ]
