@@ -1,2 +1,21 @@
+[project]
+name = "ai-assisted-syntax-compiler"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.135.1",
+    "groq==1.7.0",
+    "joblib==1.5.2",
+    "ply==3.11",
+    "pydantic==2.13.4",
+    "python-dotenv==1.2.3",
+    "scikit-learn==1.7.2",
+    "uvicorn==0.41.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["ai*", "api*", "backend*", "compiler*"]
+namespaces = true
+
 [tool.vercel]
 entrypoint = "api.index:app"
