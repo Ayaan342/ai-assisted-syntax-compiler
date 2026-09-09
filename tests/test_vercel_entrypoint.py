@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 import tomllib
 
@@ -36,3 +37,11 @@ def test_vercel_configuration_selects_the_api_adapter_explicitly() -> None:
 
     assert configuration["tool"]["vercel"]["entrypoint"] == "api.index:app"
     assert app is not None
+
+
+def test_vercel_build_runs_the_frontend_from_the_repository_root() -> None:
+    configuration = json.loads(Path("vercel.json").read_text(encoding="utf-8"))
+
+    assert configuration["installCommand"] == "npm --prefix frontend ci"
+    assert configuration["buildCommand"] == "npm --prefix frontend run build"
+    assert configuration["outputDirectory"] == "frontend/dist"

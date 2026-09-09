@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm --prefix frontend ci",
+  "buildCommand": "npm --prefix frontend run build",
+  "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/index.py": {
+      "includeFiles": [
+        "models/syntax_error_classifier.joblib"
+      ],
+      "excludeFiles": [
+        "audit/**",
+        "datasets/**",
+        "docs/**",
+        "examples/**",
+        "frontend/**",
+        "tests/**",
+        "**/__pycache__/**",
+        "**/.pytest_cache/**"
+      ],
+      "maxDuration": 60
+    }
+  }
+}
