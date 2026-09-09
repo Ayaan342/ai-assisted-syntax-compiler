@@ -14,11 +14,13 @@ from ai.error_context import ErrorContext
 from ai.error_predictor import ErrorPrediction
 from ai.llm_fallback import (
     DEFAULT_GROQ_MODEL,
+    DEFAULT_SELECTION_MAX_TOKENS,
     GroqFallbackService,
     LLMCandidateSelection,
     LLMCandidateSelectionResult,
     LLMFallbackResult,
     LLMSuggestion,
+    free_form_suggestion_rejection,
     parse_llm_suggestion,
     parse_candidate_selection,
     suggestion_to_candidate,
@@ -134,6 +136,35 @@ def validated_ambiguity_candidates():
     return source, context, validations
 
 
+def operator_ambiguity_candidates():
+    source = """int main() {
+int x = 10;
+int y = 20;
+int z = x + * y;
+
+return z;
+}"""
+    result, diagnostic, context = context_for(source)
+    validations = tuple(
+        validate_candidate(
+            source,
+            candidate,
+            target_diagnostic=diagnostic,
+            baseline_result=result,
+        )
+        for candidate in diagnostic.correction_candidates
+    )
+    validations = tuple(item for item in validations if item.relevant_valid)
+    assert {
+        (item.candidate.action, item.candidate.token_lexeme)
+        for item in validations
+    } == {
+        (CorrectionAction.DELETE, "*"),
+        (CorrectionAction.DELETE, "+"),
+    }
+    return source, context, validations
+
+
 def context_for(source: str):
     result = parse(source)
     diagnostic = result.syntax_errors[0]
@@ -208,6 +239,7 @@ def test_valid_structured_json_response_and_context_payload() -> None:
     [
         "not json",
         '{"action":"MOVE"}',
+        '{"action":"COMPOUND","replacement_text":"","target_start":1,"target_end":2,"reason":"invent edits"}',
         '{"action":"INSERT","replacement_text":")","target_start":1,"target_end":2,"reason":"bad"}',
     ],
 )
@@ -269,7 +301,57 @@ def test_invalid_llm_correction_is_rejected_and_source_unchanged() -> None:
     assert not result.success
     assert result.corrected_source == source
     assert not result.history[0].llm_fallback.accepted
-    assert result.history[0].llm_fallback.validation is not None
+    assert result.history[0].llm_fallback.validation is None
+    assert "outside_the_diagnostic_boundary" in result.history[0].llm_fallback.error
+
+
+@pytest.mark.parametrize("invented", ["0", "1", "y", "foo()", "x + 1"])
+def test_free_form_fallback_cannot_invent_missing_expression(invented) -> None:
+    source = "int main(){ int x = ; return 0; }"
+    assert parse(source).syntax_errors[0].correction_candidates == ()
+    offset = source.index(";")
+    suggestion = LLMSuggestion(
+        CorrectionAction.INSERT,
+        invented,
+        offset,
+        offset,
+        "Fill the missing expression.",
+    )
+    fallback = FakeFallback(LLMFallbackResult(True, True, "mock", suggestion))
+
+    result = CorrectionOrchestrator(
+        FixedPredictor(0.40),
+        llm_fallback=fallback,
+    ).correct(source)
+
+    assert not result.success and result.corrections_applied == 0
+    assert result.original_source == result.corrected_source == source
+    assert result.history[0].status is CorrectionStatus.UNRESOLVED
+    record = result.history[0].llm_fallback
+    assert record is not None and record.attempted and not record.accepted
+    assert record.validation is None
+    assert record.error == (
+        "Unsafe LLM suggestion: semantic_content_invention_is_forbidden"
+    )
+
+
+def test_compiler_evidenced_keyword_replacement_is_structurally_safe() -> None:
+    source = "int main(){ retrun 0; }"
+    _, _, context = context_for(source)
+    candidate = next(
+        item
+        for item in context.correction_candidates
+        if item.action is CorrectionAction.REPLACE and item.text == "return"
+    )
+    suggestion = LLMSuggestion(
+        CorrectionAction.REPLACE,
+        "return",
+        candidate.span.start.offset,
+        candidate.span.end.offset,
+        "Correct the known keyword spelling.",
+    )
+
+    assert free_form_suggestion_rejection(suggestion, context, source) is None
 
 
 def test_out_of_range_llm_edit_is_rejected_without_source_change() -> None:
@@ -479,7 +561,61 @@ def test_ambiguity_prompt_contains_only_source_context_and_validated_candidates(
     assert all(item["parser_validation"]["valid"] for item in payload["validated_candidates"])
     assert "ml_prediction" not in payload
     assert "replacement_text" not in payload["required_output"]
-    assert call["response_format"] == {"type": "json_object"}
+    assert call["reasoning_effort"] == "none"
+    response_format = call["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    schema = response_format["json_schema"]["schema"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]["selected_candidate_id"]["enum"]) == {
+        *(validation.candidate.id for validation in candidates),
+        None,
+    }
+
+
+def test_operator_ambiguity_request_uses_strict_candidate_schema() -> None:
+    source, context, candidates = operator_ambiguity_candidates()
+    selected = next(
+        item.candidate.id
+        for item in candidates
+        if item.candidate.token_lexeme == "*"
+    )
+    client, completions = fake_client(
+        json.dumps(
+            {
+                "selected_candidate_id": selected,
+                "confidence": 0.85,
+                "reason": "Deleting the unexpected operator is the more direct repair.",
+            }
+        )
+    )
+
+    result = GroqFallbackService(client=client).select_candidate(
+        source, context, candidates
+    )
+
+    assert result.selection is not None
+    assert result.selection.selected_candidate_id == selected
+    call = completions.calls[0]
+    assert call["model"] == DEFAULT_GROQ_MODEL
+    assert call["max_tokens"] == DEFAULT_SELECTION_MAX_TOKENS == 500
+    assert call["reasoning_effort"] == "none"
+    response_format = call["response_format"]
+    assert response_format["type"] == "json_schema"
+    schema = response_format["json_schema"]["schema"]
+    assert schema["properties"]["selected_candidate_id"]["enum"] == [
+        *(sorted(item.candidate.id for item in candidates)),
+        None,
+    ]
+    payload = json.loads(call["messages"][1]["content"])
+    assert payload["original_source"] == source
+    assert [
+        (item["candidate_id"], item["action"], item["token_lexeme"])
+        for item in payload["validated_candidates"]
+    ] == [
+        (item.candidate.id, "DELETE", item.candidate.token_lexeme)
+        for item in candidates
+    ]
 
 
 def test_parse_candidate_selection_is_strict() -> None:

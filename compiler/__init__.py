@@ -1,7 +1,14 @@
 """Compiler front-end primitives for the AI-assisted Mini-C compiler."""
 
 from .ast_nodes import ASTNode, Program, pretty_ast
-from .correction import CorrectionAction, CorrectionCandidate, apply_candidate, validate_candidate
+from .correction import (
+    CorrectionAction,
+    CorrectionCandidate,
+    CorrectionEdit,
+    apply_candidate,
+    validate_candidate,
+)
+from .compound_recovery import MAX_COMPOUND_EDITS, generate_compound_candidates
 from .error_recovery import DelimiterTracker, RecoveryAction
 from .errors import LexicalError, SemanticDiagnostic, SyntaxDiagnostic
 from .lexer import MiniCLexer, TokenInfo, tokenize
@@ -29,6 +36,7 @@ __all__ = [
     "ASTNode",
     "CorrectionAction",
     "CorrectionCandidate",
+    "CorrectionEdit",
     "BaseType",
     "DelimiterTracker",
     "LexicalError",
@@ -36,6 +44,7 @@ __all__ = [
     "MiniCParser",
     "ParseResult",
     "MiniCType",
+    "MAX_COMPOUND_EDITS",
     "Program",
     "RecoveryAction",
     "Scope",
@@ -58,5 +67,6 @@ __all__ = [
     "pretty_ast",
     "pretty_symbol_table",
     "tokenize",
+    "generate_compound_candidates",
     "validate_candidate",
 ]

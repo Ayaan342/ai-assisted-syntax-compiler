@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -18,6 +20,20 @@ DEVELOPMENT_ORIGINS = [
 ]
 
 
+def configured_cors_origins(value: str | None = None) -> list[str]:
+    """Return exact development and deployment origins without wildcard access."""
+
+    configured = os.getenv("CORS_ALLOWED_ORIGINS", "") if value is None else value
+    configured_origins = [origin.strip().rstrip("/") for origin in configured.split(",")]
+    if "*" in configured_origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must contain exact origins, not '*'")
+    origins = [
+        *DEVELOPMENT_ORIGINS,
+        *configured_origins,
+    ]
+    return list(dict.fromkeys(origin for origin in origins if origin))
+
+
 app = FastAPI(
     title="AI-Assisted Mini-C Compiler API",
     version="1.0.0",
@@ -25,7 +41,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=DEVELOPMENT_ORIGINS,
+    allow_origins=configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Accept"],

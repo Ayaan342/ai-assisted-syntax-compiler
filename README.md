@@ -63,3 +63,22 @@ The FastAPI endpoints, schemas, error policy, and local run instructions are in
 `docs/api.md`.
 The Phase 9 UI architecture, compiler-logic boundary, and verification commands
 are documented in `docs/frontend.md`.
+
+## Vercel deployment
+
+Deploy the repository root as one Vercel project. The Vite workbench is built as
+static output and the existing FastAPI application is mounted under `/api` by
+`api/index.py`. Production browser requests therefore stay on the deployment's
+own origin.
+
+Configure these server-side Environment Variables in Vercel Project Settings:
+
+- `GROQ_API_KEY` — required only for Groq-assisted correction paths; mark it
+  sensitive and scope it to the intended Production/Preview environments.
+- `CORS_ALLOWED_ORIGINS` — optional comma-separated exact frontend origins for
+  deliberately cross-origin clients. Never use `*`.
+
+Do not create a `VITE_GROQ_API_KEY` or place the Groq key in any frontend
+variable. Local `.env` and `.env.*` files are ignored; committed `.env.example`
+files contain names only. The deployment uses Python 3.12 so the pinned
+Scikit-learn and Joblib versions match the deployment classifier artifact.

@@ -17,6 +17,27 @@ class CorrectionAction(str, Enum):
     INSERT = "INSERT"
     DELETE = "DELETE"
     REPLACE = "REPLACE"
+    COMPOUND = "COMPOUND"
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectionEdit:
+    action: CorrectionAction
+    token_type: str | None
+    token_lexeme: str | None
+    offset: int
+    span: SourceSpan
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action.value,
+            "token_type": self.token_type,
+            "token_lexeme": self.token_lexeme,
+            "offset": self.offset,
+            "span": self.span.to_dict(),
+            "text": self.text,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +55,7 @@ class CorrectionCandidate:
     origin: str = "traditional_recovery"
     parser_validated: bool | None = None
     score: float | None = None
+    edits: tuple[CorrectionEdit, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +72,7 @@ class CorrectionCandidate:
             "origin": self.origin,
             "parser_validated": self.parser_validated,
             "score": self.score,
+            "edits": [edit.to_dict() for edit in self.edits],
         }
 
 
@@ -82,7 +105,33 @@ class CandidateValidation:
 
 
 def apply_candidate(source: str, candidate: CorrectionCandidate) -> str:
-    """Apply exactly one candidate using its half-open source span."""
+    """Apply one single or bounded compound candidate without mutating source."""
+
+    if candidate.action is CorrectionAction.COMPOUND:
+        if len(candidate.edits) < 2:
+            raise ValueError("COMPOUND candidates require at least two edits")
+        edits = sorted(
+            candidate.edits,
+            key=lambda edit: (edit.span.start.offset, edit.span.end.offset),
+            reverse=True,
+        )
+        prior_start = len(source) + 1
+        corrected = source
+        for edit in edits:
+            start = edit.span.start.offset
+            end = edit.span.end.offset
+            if edit.action is CorrectionAction.COMPOUND:
+                raise ValueError("Nested COMPOUND edits are unsupported")
+            if not (0 <= start <= end <= len(source)) or edit.offset != start:
+                raise ValueError("Compound edit span is outside the source text")
+            if end > prior_start:
+                raise ValueError("Compound edits must not overlap")
+            corrected = _apply_edit(corrected, edit.action, start, end, edit.text)
+            prior_start = start
+        return corrected
+
+    if candidate.edits:
+        raise ValueError("Only COMPOUND candidates may contain multiple edits")
 
     start = candidate.span.start.offset
     end = candidate.span.end.offset
@@ -90,15 +139,25 @@ def apply_candidate(source: str, candidate: CorrectionCandidate) -> str:
         raise ValueError("Candidate span is outside the source text")
     if candidate.offset != start:
         raise ValueError("Candidate offset must equal its span start")
-    if candidate.action is CorrectionAction.INSERT:
+    return _apply_edit(source, candidate.action, start, end, candidate.text)
+
+
+def _apply_edit(
+    source: str,
+    action: CorrectionAction,
+    start: int,
+    end: int,
+    text: str,
+) -> str:
+    if action is CorrectionAction.INSERT:
         if start != end:
             raise ValueError("INSERT candidates require a zero-width span")
-        return source[:start] + candidate.text + source[start:]
-    if candidate.action is CorrectionAction.DELETE:
+        return source[:start] + text + source[start:]
+    if action is CorrectionAction.DELETE:
         return source[:start] + source[end:]
-    if candidate.action is CorrectionAction.REPLACE:
-        return source[:start] + candidate.text + source[end:]
-    raise ValueError(f"Unsupported correction action: {candidate.action}")
+    if action is CorrectionAction.REPLACE:
+        return source[:start] + text + source[end:]
+    raise ValueError(f"Unsupported correction action: {action}")
 
 
 def validate_candidate(
@@ -134,10 +193,20 @@ def validate_candidate(
         relevant_valid = valid
     else:
         target_offset = target_diagnostic.span.start.offset
-        edit_delta = len(candidate.text) - (
-            candidate.span.end.offset - candidate.span.start.offset
-        )
-        expected_offset = target_offset + (edit_delta if candidate.offset <= target_offset else 0)
+        if candidate.action is CorrectionAction.COMPOUND:
+            edit_delta = sum(
+                len(edit.text) - (edit.span.end.offset - edit.span.start.offset)
+                for edit in candidate.edits
+                if edit.offset <= target_offset
+            )
+        else:
+            edit_delta = (
+                len(candidate.text)
+                - (candidate.span.end.offset - candidate.span.start.offset)
+                if candidate.offset <= target_offset
+                else 0
+            )
+        expected_offset = target_offset + edit_delta
         local_match = any(
             error.code == target_diagnostic.code
             and error.grammar_context == target_diagnostic.grammar_context

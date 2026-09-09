@@ -10,8 +10,13 @@ venv/
 parser.out
 parsetab.py
 models/*.joblib
+!models/syntax_error_classifier.joblib
 datasets/*.jsonl
 tests/.artifacts/
 
 .env
+.env.*
+!.env.example
+!**/.env.example
+.vercel/
 .DS_Store

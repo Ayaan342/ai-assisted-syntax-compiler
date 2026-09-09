@@ -17,6 +17,7 @@ class RankedCandidate:
     candidate: CorrectionCandidate
     compatibility_score: float
     matched_class: str | None
+    matched_classes: tuple[str, ...] = ()
     predicted_class_match: bool = False
     grammar_context_match: bool = False
     parser_validated: bool | None = None
@@ -27,6 +28,7 @@ class RankedCandidate:
             "candidate": self.candidate.to_dict(),
             "compatibility_score": self.compatibility_score,
             "matched_class": self.matched_class,
+            "matched_classes": list(self.matched_classes),
             "predicted_class_match": self.predicted_class_match,
             "grammar_context_match": self.grammar_context_match,
             "parser_validated": self.parser_validated,
@@ -35,7 +37,42 @@ class RankedCandidate:
 
 
 def candidate_class(candidate: CorrectionCandidate) -> str | None:
-    if candidate.action is CorrectionAction.INSERT:
+    classes = candidate_classes(candidate)
+    return classes[0] if len(classes) == 1 else None
+
+
+def candidate_classes(candidate: CorrectionCandidate) -> tuple[str, ...]:
+    if candidate.action is CorrectionAction.COMPOUND:
+        classes = {
+            correction_class
+            for edit in candidate.edits
+            if (
+                correction_class := _edit_class(
+                    edit.action,
+                    edit.token_type,
+                    edit.token_lexeme,
+                    edit.text,
+                )
+            )
+            is not None
+        }
+        return tuple(sorted(classes))
+    correction_class = _edit_class(
+        candidate.action,
+        candidate.token_type,
+        candidate.token_lexeme,
+        candidate.text,
+    )
+    return (correction_class,) if correction_class is not None else ()
+
+
+def _edit_class(
+    action: CorrectionAction,
+    token_type: str | None,
+    token_lexeme: str | None,
+    text: str,
+) -> str | None:
+    if action is CorrectionAction.INSERT:
         mapping = {
             "SEMICOLON": CorrectionClass.INSERT_SEMICOLON.value,
             "RPAREN": CorrectionClass.INSERT_RPAREN.value,
@@ -43,18 +80,18 @@ def candidate_class(candidate: CorrectionCandidate) -> str | None:
             "RBRACKET": CorrectionClass.INSERT_RBRACKET.value,
             "RBRACE": CorrectionClass.INSERT_RBRACE.value,
         }
-        return mapping.get(candidate.token_type)
-    if candidate.action is CorrectionAction.DELETE:
+        return mapping.get(token_type)
+    if action is CorrectionAction.DELETE:
         return CorrectionClass.DELETE_EXTRA_TOKEN.value
-    if candidate.action is CorrectionAction.REPLACE:
+    if action is CorrectionAction.REPLACE:
         if (
-            candidate.token_lexeme in {"(", ")", "[", "]"}
-            and candidate.text in {"(", ")", "[", "]"}
+            token_lexeme in {"(", ")", "[", "]"}
+            and text in {"(", ")", "[", "]"}
         ):
             return CorrectionClass.REPLACE_BRACKET.value
-        if candidate.token_type in {"EQ", "NE", "LE", "GE", "LT", "GT"}:
+        if token_type in {"EQ", "NE", "LE", "GE", "LT", "GT"}:
             return CorrectionClass.REPLACE_OPERATOR.value
-        if candidate.token_type in {
+        if token_type in {
             "INT", "FLOAT", "CHAR", "BOOL", "VOID", "IF", "ELSE", "WHILE",
             "FOR", "BREAK", "CONTINUE", "RETURN",
         }:
@@ -78,7 +115,17 @@ def rank_candidates(
 
     ranked: list[RankedCandidate] = []
     for index, candidate in enumerate(candidates):
-        matched = candidate_class(candidate)
+        classes = candidate_classes(candidate)
+        predicted_match = prediction.label in classes
+        matched = (
+            prediction.label
+            if predicted_match
+            else max(
+                classes,
+                key=lambda item: prediction.probabilities.get(item, 0.0),
+                default=None,
+            )
+        )
         validation = validations.get(candidate.id) if validations else None
         parser_validated = (
             validation.relevant_valid if isinstance(validation, CandidateValidation) else validation
@@ -88,7 +135,8 @@ def rank_candidates(
                 candidate=candidate,
                 compatibility_score=prediction.probabilities.get(matched or "", 0.0),
                 matched_class=matched,
-                predicted_class_match=matched == prediction.label,
+                matched_classes=classes,
+                predicted_class_match=predicted_match,
                 grammar_context_match=(
                     context is not None and candidate.grammar_context == context.grammar_context
                 ),

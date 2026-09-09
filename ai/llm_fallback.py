@@ -24,7 +24,25 @@ DEFAULT_MAX_TOKENS = 500
 DEFAULT_SELECTION_MAX_TOKENS = 500
 DEFAULT_AMBIGUITY_SELECTION_THRESHOLD = 0.75
 MAX_REPLACEMENT_LENGTH = 80
-SUPPORTED_ACTIONS = {item.value for item in CorrectionAction}
+SUPPORTED_ACTIONS = {
+    CorrectionAction.INSERT.value,
+    CorrectionAction.DELETE.value,
+    CorrectionAction.REPLACE.value,
+}
+STRUCTURAL_TOKEN_TEXT = {
+    "SEMICOLON": ";",
+    "COMMA": ",",
+    "LPAREN": "(",
+    "RPAREN": ")",
+    "LBRACKET": "[",
+    "RBRACKET": "]",
+    "LBRACE": "{",
+    "RBRACE": "}",
+}
+KNOWN_KEYWORDS = {
+    "int", "float", "char", "bool", "void", "if", "else", "while", "for",
+    "break", "continue", "return",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +241,8 @@ class GroqFallbackService:
                 ],
                 temperature=DEFAULT_TEMPERATURE,
                 max_tokens=DEFAULT_SELECTION_MAX_TOKENS,
-                response_format={"type": "json_object"},
+                reasoning_effort="none",
+                response_format=_candidate_selection_response_format(candidate_ids),
             )
             content = completion.choices[0].message.content
             selection = parse_candidate_selection(content, candidate_ids)
@@ -312,6 +331,124 @@ def parse_candidate_selection(
     return LLMCandidateSelection(candidate_id, float(confidence), reason.strip())
 
 
+def free_form_suggestion_rejection(
+    suggestion: LLMSuggestion,
+    context: ErrorContext,
+    source: str,
+) -> str | None:
+    """Reject free-form edits that are not structural and compiler-evidenced."""
+
+    start = suggestion.target_start
+    end = suggestion.target_end
+    if not (0 <= start <= end <= len(source)):
+        return "target_range_outside_source"
+
+    if suggestion.action is CorrectionAction.INSERT:
+        token_type = next(
+            (
+                name
+                for name, text in STRUCTURAL_TOKEN_TEXT.items()
+                if text == suggestion.replacement_text
+            ),
+            None,
+        )
+        if token_type is None:
+            return "semantic_content_invention_is_forbidden"
+        if token_type not in context.expected_tokens:
+            return "inserted_structure_is_not_expected_by_the_parser"
+        if not _is_local_whitespace_insertion(start, context, source):
+            return "structural_insertion_is_outside_the_diagnostic_boundary"
+        return None
+
+    matching = next(
+        (
+            candidate
+            for candidate in context.correction_candidates
+            if candidate.action is suggestion.action
+            and candidate.span.start.offset == start
+            and candidate.span.end.offset == end
+            and candidate.text == suggestion.replacement_text
+        ),
+        None,
+    )
+    if matching is None:
+        return "edit_is_not_supported_by_a_compiler_generated_candidate"
+
+    original = source[start:end]
+    if suggestion.action is CorrectionAction.DELETE:
+        if not original or any(character.isalnum() or character == "_" for character in original):
+            return "deleting_identifiers_literals_or_keywords_is_forbidden"
+        return None
+
+    replacement = suggestion.replacement_text
+    structural_replacement = (
+        original in STRUCTURAL_TOKEN_TEXT.values()
+        and replacement in STRUCTURAL_TOKEN_TEXT.values()
+    ) or (
+        original
+        and replacement
+        and not any(character.isalnum() or character == "_" for character in original)
+        and not any(character.isalnum() or character == "_" for character in replacement)
+    )
+    keyword_replacement = (
+        replacement in KNOWN_KEYWORDS
+        and original.isidentifier()
+        and matching.token_type is not None
+    )
+    if structural_replacement or keyword_replacement:
+        return None
+    return "semantic_content_invention_is_forbidden"
+
+
+def _is_local_whitespace_insertion(
+    offset: int,
+    context: ErrorContext,
+    source: str,
+) -> bool:
+    current_offset = (
+        context.current_token.offset if context.current_token is not None else len(source)
+    )
+    previous_end = (
+        context.previous_tokens[-1].offset + len(context.previous_tokens[-1].lexeme)
+        if context.previous_tokens
+        else current_offset
+    )
+    if not previous_end <= offset <= current_offset:
+        return False
+    return not source[previous_end:current_offset].strip()
+
+
+def _candidate_selection_response_format(candidate_ids: set[str]) -> dict[str, Any]:
+    """Constrain Groq output to the supplied IDs or an explicit unresolved result."""
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "compiler_candidate_selection",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "selected_candidate_id": {
+                        "enum": [*sorted(candidate_ids), None],
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                    },
+                    "reason": {
+                        "type": "string",
+                        "maxLength": 240,
+                    },
+                },
+                "required": ["selected_candidate_id", "confidence", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def suggestion_to_candidate(
     suggestion: LLMSuggestion,
     diagnostic: SyntaxDiagnostic,
@@ -352,7 +489,11 @@ def _structured_context(
 ) -> dict[str, Any]:
     return {
         "language": "Mini-C",
-        "instruction": "Propose exactly one minimal syntax edit using absolute source offsets.",
+        "instruction": (
+            "Propose exactly one minimal compiler-evidenced structural syntax edit using "
+            "absolute source offsets. Never invent identifiers, operands, literals, calls, "
+            "expressions, conditions, declarations, or semantic values."
+        ),
         "grammar_context": context.grammar_context,
         "unexpected_token": context.unexpected_token,
         "unexpected_lexeme": context.unexpected_lexeme,
@@ -405,6 +546,9 @@ def _selection_context(
                 "target_end": validation.candidate.span.end.offset,
                 "replacement_text": validation.candidate.text,
                 "compiler_reason": validation.candidate.reason,
+                "edits": [
+                    edit.to_dict() for edit in validation.candidate.edits
+                ],
                 "corrected_source": validation.corrected_source,
                 "parser_validation": {
                     "valid": validation.valid,
@@ -434,6 +578,9 @@ rewritten program. Return one JSON object with exactly these fields: action,
 replacement_text, target_start, target_end, reason. action must be INSERT, DELETE,
 or REPLACE. Offsets are absolute and the target range is half-open. For INSERT,
 target_start must equal target_end. For DELETE, replacement_text must be empty.
+Only propose compiler-evidenced punctuation, delimiter, operator, or known-keyword
+repairs. Never invent identifiers, operands, literals, function calls, expressions,
+declarations, return values, conditions, or other semantic program content.
 Do not include Markdown, explanations outside JSON, or additional fields."""
 
 

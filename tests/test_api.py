@@ -16,7 +16,7 @@ from ai.llm_fallback import (
     LLMSuggestion,
 )
 from backend.app.dependencies import ModelUnavailableError, get_orchestrator
-from backend.app.main import app
+from backend.app.main import app, configured_cors_origins
 from compiler.correction import CorrectionAction
 from compiler.parser import parse
 
@@ -81,6 +81,10 @@ class SelectingFallback(FakeFallback):
             validation
             for validation in candidates
             if validation.candidate.action is CorrectionAction.DELETE
+            or any(
+                edit.action is CorrectionAction.DELETE
+                for edit in validation.candidate.edits
+            )
         )
         return LLMCandidateSelectionResult(
             True,
@@ -108,6 +112,22 @@ def request(method: str, path: str, **kwargs) -> httpx.Response:
             return await client.request(method, path, **kwargs)
 
     return asyncio.run(send())
+
+
+def test_configured_cors_origins_are_exact_and_deduplicated() -> None:
+    origins = configured_cors_origins(
+        "https://compiler.example, https://preview.example/,https://compiler.example"
+    )
+
+    assert "http://localhost:5173" in origins
+    assert "http://127.0.0.1:5173" in origins
+    assert "https://compiler.example" in origins
+    assert "https://preview.example" in origins
+    assert origins.count("https://compiler.example") == 1
+    assert "*" not in origins
+
+    with pytest.raises(ValueError, match="exact origins"):
+        configured_cors_origins("*")
 
 
 def use_orchestrator(orchestrator: CorrectionOrchestrator) -> None:
@@ -209,6 +229,47 @@ def test_correction_response_is_complete_and_serializable() -> None:
     assert body["unresolved_syntax_diagnostics"] == []
 
 
+def test_correction_api_serializes_validated_compound_edit() -> None:
+    source = "int main(){ int x=1; if ((x > 5] { return x; } return 0; }"
+    use_orchestrator(CorrectionOrchestrator(FixedPredictor(0.99)))
+
+    response = request("POST", "/correct", json={"code": source})
+    body = response.json()
+
+    assert response.status_code == 200 and body["success"]
+    assert body["original_code"] == source
+    assert body["corrected_code"] != source
+    history = body["history"][0]
+    candidate = history["selected_candidate"]
+    assert candidate["action"] == "COMPOUND"
+    assert candidate["origin"] == "compound_recovery"
+    assert len(candidate["edits"]) == 2
+    assert {edit["action"] for edit in candidate["edits"]} == {"INSERT", "REPLACE"}
+    assert history["validation"]["relevant_valid"]
+    assert parse(body["corrected_code"]).valid
+
+
+def test_correction_api_serializes_groq_selected_compound_edit() -> None:
+    source = "int main(){ int x=1; if ((x > 5] { return x; } return 0; }"
+    selector = SelectingFallback()
+    use_orchestrator(
+        CorrectionOrchestrator(AmbiguousBracePredictor(), llm_fallback=selector)
+    )
+
+    body = request("POST", "/correct", json={"code": source}).json()
+
+    assert body["success"] and body["corrections_applied"] == 1
+    assert body["original_code"] == source
+    assert body["corrected_code"] != source
+    assert body["ambiguity_selection_used"]
+    history = body["history"][0]
+    assert history["selected_candidate"]["action"] == "COMPOUND"
+    assert len(history["selected_candidate"]["edits"]) == 2
+    assert history["ambiguity_selection"]["accepted"]
+    assert history["ambiguity_selection"]["validation"]["relevant_valid"]
+    assert parse(body["corrected_code"]).valid
+
+
 def test_correction_api_preserves_unique_validated_semicolon_over_unrelated_ml_class() -> None:
     source = """int main() {
 int x = 10;
@@ -293,6 +354,32 @@ def test_correction_endpoint_supports_mocked_llm_fallback() -> None:
     assert body["success"] and body["groq_fallback_used"]
     assert fallback.calls == 1
     assert body["history"][0]["llm_fallback"]["accepted"]
+
+
+def test_correction_api_rejects_llm_invented_missing_expression() -> None:
+    source = "int main(){ int x = ; return 0; }"
+    offset = source.index(";")
+    suggestion = LLMSuggestion(
+        CorrectionAction.INSERT,
+        "0",
+        offset,
+        offset,
+        "Invent a default initializer.",
+    )
+    fallback = FakeFallback(LLMFallbackResult(True, True, "mock-groq", suggestion))
+    use_orchestrator(
+        CorrectionOrchestrator(FixedPredictor(0.40), llm_fallback=fallback)
+    )
+
+    body = request("POST", "/correct", json={"code": source}).json()
+
+    assert not body["success"] and body["corrections_applied"] == 0
+    assert body["original_code"] == body["corrected_code"] == source
+    assert body["stop_reason"] == "no_safe_candidate"
+    history = body["history"][0]
+    assert history["status"] == "UNRESOLVED"
+    assert not history["llm_fallback"]["accepted"]
+    assert "semantic_content_invention_is_forbidden" in history["llm_fallback"]["error"]
 
 
 def test_missing_code_request_returns_422() -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from compiler.correction import CandidateValidation, CorrectionCandidate, validate_candidate
+from compiler.compound_recovery import generate_compound_candidates
 from compiler.errors import SemanticDiagnostic, SyntaxDiagnostic
 from compiler.parser import ParseResult, parse
 from compiler.semantic_analyzer import analyze_source_semantics
@@ -22,6 +23,7 @@ from .llm_fallback import (
     LLMFallbackResult,
     LLMFallbackService,
     LLMSuggestion,
+    free_form_suggestion_rejection,
     suggestion_to_candidate,
 )
 
@@ -340,6 +342,59 @@ class CorrectionOrchestrator:
                     progressing.append((rank, ranked_item, validation))
 
             if not progressing:
+                compound_ranked = rank_candidates(
+                    generate_compound_candidates(
+                        current,
+                        baseline.tokens,
+                        baseline.syntax_errors,
+                        diagnostic,
+                    ),
+                    prediction,
+                    context=context,
+                )
+                compound_progressing: list[
+                    tuple[int, RankedCandidate, CandidateValidation]
+                ] = []
+                for ranked_item in compound_ranked[: self.policy.max_candidate_attempts]:
+                    attempt_rank = len(attempts) + 1
+                    scored = replace(
+                        ranked_item.candidate,
+                        score=ranked_item.compatibility_score,
+                    )
+                    validation = validate_candidate(
+                        current,
+                        scored,
+                        target_diagnostic=diagnostic,
+                        baseline_result=baseline,
+                    )
+                    makes_progress = (
+                        validation.relevant_valid
+                        and validation.corrected_source != current
+                        and validation.corrected_source not in seen_sources
+                    )
+                    reason = (
+                        None
+                        if makes_progress
+                        else _rejection_reason(validation, current, seen_sources)
+                    )
+                    attempts.append(
+                        CandidateAttempt(
+                            attempt_rank,
+                            ranked_item,
+                            validation,
+                            makes_progress,
+                            reason,
+                        )
+                    )
+                    if makes_progress:
+                        compound_progressing.append(
+                            (attempt_rank, ranked_item, validation)
+                        )
+                if compound_progressing:
+                    ranked = compound_ranked
+                    progressing = compound_progressing
+
+            if not progressing:
                 fallback = self._try_llm_fallback(
                     current, baseline, diagnostic, context, prediction, seen_sources
                 ) if auto_apply else None
@@ -394,7 +449,11 @@ class CorrectionOrchestrator:
                 for item in choices
                 if item[1].matched_class == prediction.label
             ]
-            if len(choices) > 1 and len(predicted_choices) != 1:
+            reliable_model_choice = (
+                len(predicted_choices) == 1
+                and prediction.confidence >= self.policy.auto_apply_threshold
+            )
+            if len(choices) > 1 and not reliable_model_choice:
                 ambiguity = (
                     self._try_ambiguity_selection(
                         current,
@@ -472,11 +531,16 @@ class CorrectionOrchestrator:
             rank, ranked_item, validation = selected
             selected_candidate = validation.candidate
             deterministic_compiler_edit = (
-                len(ranked) == 1
-                and ranked_item.matched_class is not None
-                and selected_candidate.origin == "traditional_recovery"
-                and validation.relevant_valid
-            )
+                (
+                    len(ranked) == 1
+                    and selected_candidate.origin == "traditional_recovery"
+                    and ranked_item.matched_class is not None
+                )
+                or (
+                    len(choices) == 1
+                    and selected_candidate.origin == "compound_recovery"
+                )
+            ) and validation.relevant_valid
 
             # A unique compiler-generated edit that resolves the diagnostic is
             # authoritative. The classifier still ranks and explains it, but an
@@ -656,6 +720,13 @@ class CorrectionOrchestrator:
         )
         if result.suggestion is None:
             return record
+        unsafe_reason = free_form_suggestion_rejection(
+            result.suggestion,
+            context,
+            source,
+        )
+        if unsafe_reason is not None:
+            return replace(record, error=f"Unsafe LLM suggestion: {unsafe_reason}")
         try:
             candidate = suggestion_to_candidate(result.suggestion, diagnostic, source)
             validation = validate_candidate(
