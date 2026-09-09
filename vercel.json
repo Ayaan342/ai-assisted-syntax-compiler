@@ -9,16 +9,7 @@
       "includeFiles": [
         "models/syntax_error_classifier.joblib"
       ],
-      "excludeFiles": [
-        "audit/**",
-        "datasets/**",
-        "docs/**",
-        "examples/**",
-        "frontend/**",
-        "tests/**",
-        "**/__pycache__/**",
-        "**/.pytest_cache/**"
-      ],
+      "excludeFiles": "{audit/**,datasets/**,docs/**,examples/**,frontend/**,tests/**,**/__pycache__/**,**/.pytest_cache/**}",
       "maxDuration": 60
     }
   }
