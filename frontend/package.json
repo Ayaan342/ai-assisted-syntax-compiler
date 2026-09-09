@@ -2,6 +2,9 @@
   "name": "minic-workbench",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20.19.0 <25"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
